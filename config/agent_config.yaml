@@ -1,0 +1,169 @@
+paths:
+  base_dir: "."
+  cache_dir: ".cache"
+  model_dir: "models"
+
+agent:
+  name: "InstructionDataGenerator"
+  version: "1.0.0"
+  
+  # Input processing settings
+  input_processing:
+    max_workers: 4
+    batch_size: 100
+    reprocess_existing: false
+    max_file_size_mb: 50
+    supported_formats:
+      documents:
+        - ".txt"
+        - ".md"
+        - ".doc"
+        - ".docx"
+        - ".pdf"
+        - ".ppt"
+        - ".pptx"
+        - ".xls"
+        - ".xlsx"
+      images:
+        - ".png"
+        - ".jpg"
+        - ".jpeg"
+        - ".gif"
+        - ".bmp"
+
+  data_processing:
+    batch_size: 32
+    num_workers: 4
+    
+  # Instruction generation settings
+  instruction_generation:
+    min_question_length: 10
+    max_question_length: 150
+    min_answer_length: 20
+    max_answer_length: 500
+    max_instructions_per_doc: 10
+    min_instruction_length: 10
+    max_instruction_length: 2000
+    
+    templates:
+      - name: "task_description"
+        weight: 1.0
+      - name: "question_answer"
+        weight: 1.0
+      - name: "step_by_step"
+        weight: 0.8
+      - name: "compare_contrast"
+        weight: 0.6
+    
+    augmentation:
+      enabled: true
+      techniques:
+        - "paraphrase"
+        - "generalize"
+        - "specific"
+      max_variants: 3
+
+  # Quality control settings
+  quality_control:
+    min_quality_score: 0.7
+    min_confidence: 0.7
+    duplicate_threshold: 0.95
+    language_check: true
+    content_filters:
+      - "profanity"
+      - "personal_info"
+      - "code_snippets"
+    
+    metrics:
+      - "completeness"
+      - "readability"
+      - "relevance"
+      - "diversity"
+      - "answerability"
+      - "specificity"
+    
+    thresholds:
+      relevance: 0.6
+      rouge_l: 0.3
+      answer_presence: 0.8
+
+  # Document processing settings
+  document_processing:
+    extract_images: true
+    ocr_enabled: true
+    ocr_config:
+      language: "eng"
+      psm: 3  # Page segmentation mode
+      oem: 3  # OCR Engine mode
+    
+    pdf_settings:
+      extract_images: true
+      use_ocr_fallback: true
+      dpi: 300
+      
+    image_settings:
+      min_size: [32, 32]
+      max_size: [4096, 4096]
+      allowed_formats: ["RGB", "L"]
+      preprocessing:
+        - resize_if_needed
+        - normalize
+        - enhance_contrast
+    
+    text_settings:
+      min_chars: 10
+      max_chars: 100000
+      clean_whitespace: true
+      remove_urls: false
+      keep_tables: true
+      table_format: "markdown"
+
+    max_page_length: 1000
+    context_window: 200
+    relationship_types:
+      - page_content
+      - slide_content
+      - embedded_content
+      - proximity
+      - document_section
+    visual_elements:
+      - figures
+      - charts
+      - diagrams
+      - tables
+      - embedded_images
+    chunk_size: 512
+    chunk_overlap: 50
+
+  # Model settings
+  model:
+    instruction_model: "gpt-4"
+    quality_model: "text-davinci-003"
+    embedding_model: "text-embedding-ada-002"
+    
+    batch_size: 16
+    max_tokens: 2000
+    temperature: 0.7
+    top_p: 0.9
+    presence_penalty: 0.0
+    frequency_penalty: 0.0
+    
+    cache_enabled: true
+    cache_ttl_hours: 24
+
+  # Output settings  
+  output:
+    format: "jsonl"
+    include_metadata: true
+    save_intermediates: false
+    export_format: "jsonl"
+    compress: true
+    
+    splits:
+      train: 0.8
+      validation: 0.1
+      test: 0.1
+
+    save_intermediate: true
+    output_dir: data/output/instruction_data
+    log_dir: data/logs

@@ -1,0 +1,110 @@
+# Model configurations
+models:
+  image_annotation:
+    name: "phi-3.5-vision-instruct"  # Alternative: "BLIP-2"
+    parameters:
+      max_new_tokens: 100
+      temperature: 0.7
+  
+  # Text generation models
+  question_generation:
+    name: "gpt-4o"  # Can be gpt-4o, phi-3.5, or flan-t5-xxl
+    parameters:
+      temperature: 0.8
+      top_p: 0.95
+      max_new_tokens: 150
+      num_beams: 4
+      no_repeat_ngram_size: 3
+      early_stopping: true
+    fallback_model: "phi-3.5"
+
+  self_instruct:
+    name: "gpt-4o"
+    parameters:
+      temperature: 0.9
+      top_p: 0.95
+      max_new_tokens: 200
+      presence_penalty: 0.2
+      frequency_penalty: 0.3
+    fallback_model: "phi-3.5"
+
+  # Document processing models
+  document_understanding:
+    layout_model: "microsoft/layoutlm-base-uncased"
+    ocr_model: "tesseract"
+    table_model: "microsoft/table-transformer-detection"
+    parameters:
+      max_seq_length: 512
+      doc_stride: 128
+      batch_size: 16
+
+  # Image processing models
+  image_processing:
+    caption_model: "Salesforce/blip2-opt-2.7b"
+    visual_qa_model: "Salesforce/blip2-opt-2.7b-vqa"
+    object_detection: "facebook/detr-resnet-50"
+    parameters:
+      max_length: 100
+      num_beams: 4
+      min_length: 10
+      repetition_penalty: 1.5
+
+  # Quality assessment models
+  quality_assessment:
+    text_relevance: "bert-base-uncased"
+    answer_validation: "roberta-large-mnli"
+    parameters:
+      batch_size: 32
+      max_length: 512
+      threshold: 0.7
+
+# Model caching and optimization
+optimization:
+  use_cuda: true
+  mixed_precision: true
+  cache_dir: "cache/models"
+  load_in_8bit: true
+  use_better_transformers: true
+  max_memory:
+    gpu: "12GB"
+    cpu: "32GB"
+
+# Default model parameters
+default_parameters:
+  max_length: 512
+  temperature: 0.8
+  top_p: 0.95
+  top_k: 50
+  repetition_penalty: 1.2
+  length_penalty: 1.0
+  batch_size: 16
+  gradient_accumulation_steps: 1
+
+# Model-specific prompts and templates
+prompts:
+  question_generation:
+    base_template: |
+      Generate a question based on the following content:
+      Content: {context}
+      Answer: {answer}
+      Requirements:
+      1. Question must be answerable using only the given content
+      2. Question should be clear and specific
+      3. Question should focus on the provided answer
+      Generate question:
+
+  visual_question:
+    base_template: |
+      Generate a question about the visual content described below:
+      Visual description: {description}
+      Context: {context}
+      Focus on: {focus}
+      Generate a clear and specific question:
+
+  document_question:
+    base_template: |
+      Generate a question about the following content from a {doc_type}:
+      Content: {content}
+      Focus area: {focus}
+      Document section: {section}
+      Generate a question that:

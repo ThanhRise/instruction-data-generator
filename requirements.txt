@@ -1,0 +1,58 @@
+# Core dependencies
+torch>=2.0.0
+transformers>=4.30.0
+langchain>=0.1.0
+numpy>=1.24.0
+pandas>=2.0.0
+pyyaml>=6.0.1
+
+# NLP and ML tools
+spacy>=3.5.0
+en-core-web-lg @ https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.5.0/en_core_web_lg-3.5.0-py3-none-any.whl
+tokenizers>=0.13.3
+rouge-score>=0.1.2
+scikit-learn>=1.3.0
+
+# Image processing
+Pillow>=10.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
+timm>=0.9.0
+
+# Document processing
+python-docx>=0.8.11  # For DOC/DOCX files
+PyPDF2>=3.0.0      # For PDF files
+pdf2image>=1.16.3   # For converting PDF pages to images
+pytesseract>=0.3.10 # For OCR
+openpyxl>=3.1.2    # For Excel files
+python-pptx>=0.6.21 # For PowerPoint files
+mammoth>=1.6.0     # For DOCX to HTML conversion
+pdfplumber>=0.9.0  # For better PDF text extraction
+markdown>=3.4.3     # For Markdown files
+python-magic>=0.4.27
+
+# OCR and image processing
+tesseract>=4.1.1
+
+# Utilities
+tqdm>=4.65.0
+python-dotenv>=1.0.0
+rich>=13.4.2
+loguru>=0.7.0
+concurrent-futures>=3.0.5
+
+# Optional: For improved performance
+accelerate>=0.20.0
+optimum>=1.12.0
+bitsandbytes>=0.41.0
+sentencepiece>=0.1.99
+
+# Quality metrics
+bert-score>=0.3.13
+evaluate>=0.4.0
+
+# Development tools
+pytest>=7.3.1
+black>=23.3.0
+isort>=5.12.0
+mypy>=1.3.0

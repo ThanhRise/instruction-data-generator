@@ -1,0 +1,28 @@
+# Ignore Python cache and virtual environments
+__pycache__/
+*.py[cod]
+venv/
+.env
+
+# Ignore VS Code and JetBrains IDE settings
+.vscode/
+.idea/
+
+# Ignore data and output directories
+data/
+processed/
+
+# Ignore model weights, cache, and logs
+.cache/
+models/
+*.log
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore test outputs
+*.pytest_cache/
+
+# Ignore environment config
+config/.env
