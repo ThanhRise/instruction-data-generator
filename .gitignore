@@ -14,7 +14,6 @@ processed/
 
 # Ignore model weights, cache, and logs
 .cache/
-models/
 *.log
 
 # Ignore OS files
