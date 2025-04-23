@@ -1,6 +1,7 @@
 from typing import Dict, List, Any, Optional
 import logging
 import random
+import torch
 from langchain.prompts import PromptTemplate
 from ..models.model_loader import ModelLoader
 
@@ -9,16 +10,28 @@ logger = logging.getLogger(__name__)
 class SelfInstructGenerator:
     """Generates additional instruction data using self-instruction techniques."""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], model_name: Optional[str] = None, model_instance: Optional[Any] = None):
         """
         Initialize the self-instruction generator.
         
         Args:
             config: Configuration dictionary
+            model_name: Optional specific model to use instead of default
+            model_instance: Optional pre-configured model instance to use instead of loading from config
         """
         self.config = config
-        self.model_loader = ModelLoader(config)
-        self.model = self.model_loader.get_model("self_instruct")
+        self.model_name = model_name if not model_instance else "custom_model"
+        
+        if model_instance:
+            # Use provided model instance
+            self.model = {
+                "model": model_instance,
+                "sampling_params": self.config["models"]["serving"]["vllm"]
+            }
+        else:
+            # Initialize model loader and load from config
+            self.model_loader = ModelLoader(config)
+            self.model = self.model_loader.get_model("self_instruct", model_name)
     
     def generate_instructions(
         self,
@@ -26,53 +39,41 @@ class SelfInstructGenerator:
         seed_qa_pairs: List[Dict[str, Any]],
         num_pairs: int = 5
     ) -> List[Dict[str, Any]]:
-        """
-        Generate new QA pairs using self-instruction.
-        
-        Args:
-            content: Source content text
-            seed_qa_pairs: List of seed QA pairs to guide generation
-            num_pairs: Number of new pairs to generate
-            
-        Returns:
-            List of generated QA pairs
-        """
+        """Generate new QA pairs using self-instruction."""
         try:
             # Format seed examples
             examples = self._format_examples(seed_qa_pairs)
             
-            # Prepare self-instruction prompt
-            prompt_template = PromptTemplate(
-                template=(
-                    "Given the following text, generate {num_pairs} new question-answer pairs. "
-                    "The questions and answers must be derived ONLY from the information in the text. "
-                    "Do not include any external knowledge.\n\n"
-                    "Text:\n{content}\n\n"
-                    "Here are some example question-answer pairs for reference:\n{examples}\n\n"
-                    "Instructions:\n"
-                    "1. Questions should be clear and specific\n"
-                    "2. Answers must come directly from the text\n"
-                    "3. Vary the types of questions (what, how, why, etc.)\n"
-                    "4. Make questions progressively more complex\n"
-                    "5. Format each pair as 'Q: [question] A: [answer]'\n\n"
-                    "Generate {num_pairs} new question-answer pairs:"
-                ),
-                input_variables=["content", "examples", "num_pairs"]
-            )
+            # Get model components
+            model_dict = self.model
+            model_type = next(iter(model_dict["model"].__class__.__module__.split(".")))
             
-            # Generate new pairs
-            prompt = prompt_template.format(
-                content=content,
-                examples=examples,
-                num_pairs=num_pairs
-            )
-            
-            # Get model response
-            model = self.model["model"]
-            response = model.predict(prompt) if hasattr(model, 'predict') else model(prompt)
-            
-            # Parse generated pairs
-            generated_pairs = self._parse_qa_pairs(response, content)
+            # Generate based on model type
+            if model_type == "vllm":
+                generated_pairs = self._generate_with_vllm(
+                    model_dict["model"],
+                    model_dict["sampling_params"],
+                    content,
+                    examples,
+                    num_pairs
+                )
+            elif model_type in ["langchain", "openai"]:
+                generated_pairs = self._generate_with_llm(
+                    model_dict["model"],
+                    content,
+                    examples,
+                    num_pairs
+                )
+            elif model_type == "transformers":
+                generated_pairs = self._generate_with_transformers(
+                    model_dict["model"],
+                    model_dict["tokenizer"],
+                    content,
+                    examples,
+                    num_pairs
+                )
+            else:
+                raise ValueError(f"Unsupported model type: {model_type}")
             
             # Add metadata and validate
             validated_pairs = []
@@ -80,14 +81,118 @@ class SelfInstructGenerator:
                 if self._validate_pair(pair, content):
                     pair["source"] = seed_qa_pairs[0]["source"]  # Use same source as seed
                     pair["generation_type"] = "self_instruct"
+                    pair["model_used"] = self.model_name or "default"
                     validated_pairs.append(pair)
             
-            return validated_pairs[:num_pairs]  # Ensure we return requested number
+            return validated_pairs[:num_pairs]
             
         except Exception as e:
             logger.error(f"Error in self-instruction generation: {e}")
             return []
-    
+
+    def _generate_with_vllm(
+        self,
+        model: Any,
+        sampling_params: Any,
+        content: str,
+        examples: str,
+        num_pairs: int
+    ) -> List[Dict[str, Any]]:
+        """Generate instruction pairs using vLLM."""
+        try:
+            # Prepare prompt
+            prompt = self._get_generation_prompt(content, examples, num_pairs)
+            
+            # Generate completions
+            outputs = model.generate([prompt], sampling_params)
+            
+            # Parse generated pairs
+            pairs = []
+            for output in outputs:
+                generated_text = output.outputs[0].text
+                pairs.extend(self._parse_qa_pairs(generated_text, content))
+            
+            return pairs
+            
+        except Exception as e:
+            logger.error(f"Error generating with vLLM: {e}")
+            return []
+
+    def _generate_with_transformers(
+        self,
+        model: Any,
+        tokenizer: Any,
+        content: str,
+        examples: str,
+        num_pairs: int
+    ) -> List[Dict[str, Any]]:
+        """Generate instruction pairs using Hugging Face transformers."""
+        try:
+            prompt = self._get_generation_prompt(content, examples, num_pairs)
+            
+            inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                max_length=1024,
+                truncation=True
+            ).to(model.device)
+            
+            with torch.no_grad():
+                outputs = model.generate(
+                    inputs["input_ids"],
+                    max_new_tokens=512,
+                    num_return_sequences=2,
+                    temperature=0.9,
+                    top_p=0.95,
+                    do_sample=True
+                )
+            
+            # Decode and parse outputs
+            pairs = []
+            for output in outputs:
+                decoded = tokenizer.decode(output, skip_special_tokens=True)
+                pairs.extend(self._parse_qa_pairs(decoded, content))
+            
+            return pairs
+            
+        except Exception as e:
+            logger.error(f"Error generating with transformers: {e}")
+            return []
+
+    def _generate_with_llm(
+        self,
+        model: Any,
+        content: str,
+        examples: str,
+        num_pairs: int
+    ) -> List[Dict[str, Any]]:
+        """Generate instruction pairs using LLM."""
+        try:
+            prompt = self._get_generation_prompt(content, examples, num_pairs)
+            
+            # Generate pairs
+            response = model(prompt)
+            
+            # Parse generated pairs
+            return self._parse_qa_pairs(response, content)
+            
+        except Exception as e:
+            logger.error(f"Error generating with LLM: {e}")
+            return []
+
+    def _get_generation_prompt(
+        self,
+        content: str,
+        examples: str,
+        num_pairs: int
+    ) -> str:
+        """Get prompt for instruction generation."""
+        return self.config["models"]["prompts"]["self_instruct"]["base_template"].format(
+            text=content,
+            examples=examples,
+            num_pairs=num_pairs
+        )
+
     def _format_examples(self, qa_pairs: List[Dict[str, Any]]) -> str:
         """Format QA pairs as examples for the prompt."""
         examples = []

@@ -1,9 +1,25 @@
 import logging
-from typing import Dict, List, Any, Union, Optional
+from typing import Dict, List, Any, Union, Optional, Callable
 from pathlib import Path
 import json
-import yaml
 from datetime import datetime
+import time
+
+# Optional dependencies with fallbacks
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+try:
+    import torch
+except ImportError:
+    torch = None
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +56,9 @@ def load_yaml_config(file_path: Union[str, Path]) -> Dict[str, Any]:
     Returns:
         Dictionary containing configuration
     """
+    if not yaml:
+        raise ImportError("PyYAML is required for loading YAML files")
+    
     try:
         with open(file_path, 'r') as f:
             config = yaml.safe_load(f)
@@ -221,6 +240,9 @@ def merge_configs(*config_files: Union[str, Path], env_file: Optional[Union[str,
     Returns:
         Merged configuration dictionary
     """
+    if not yaml:
+        raise ImportError("PyYAML is required for config file handling")
+    
     merged = {}
     
     # Load and merge YAML configs
@@ -278,3 +300,136 @@ def validate_config(config: Dict[str, Any], required_keys: List[str]) -> bool:
         return False
         
     return True
+
+class ModelMetricsLogger:
+    """Tracks and logs model performance metrics."""
+    
+    def __init__(self, log_dir: Optional[str] = None):
+        self.log_dir = Path(log_dir) if log_dir else Path("logs")
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.metrics = {}
+    
+    def log_model_usage(
+        self,
+        model_name: str,
+        task_type: str,
+        duration: float,
+        input_tokens: int,
+        output_tokens: int,
+        success: bool,
+        error: Optional[str] = None
+    ) -> None:
+        """Log a model usage event."""
+        if model_name not in self.metrics:
+            self.metrics[model_name] = {
+                "total_calls": 0,
+                "successful_calls": 0,
+                "failed_calls": 0,
+                "total_duration": 0.0,
+                "avg_duration": 0.0,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "tasks": {},
+                "errors": []
+            }
+        
+        model_metrics = self.metrics[model_name]
+        model_metrics["total_calls"] += 1
+        model_metrics["successful_calls" if success else "failed_calls"] += 1
+        model_metrics["total_duration"] += duration
+        model_metrics["avg_duration"] = (
+            model_metrics["total_duration"] / model_metrics["total_calls"]
+        )
+        model_metrics["total_input_tokens"] += input_tokens
+        model_metrics["total_output_tokens"] += output_tokens
+        
+        if task_type not in model_metrics["tasks"]:
+            model_metrics["tasks"][task_type] = {
+                "calls": 0,
+                "successes": 0,
+                "failures": 0,
+                "total_duration": 0.0
+            }
+        
+        task_metrics = model_metrics["tasks"][task_type]
+        task_metrics["calls"] += 1
+        task_metrics["successes" if success else "failures"] += 1
+        task_metrics["total_duration"] += duration
+        
+        if not success and error:
+            model_metrics["errors"].append({
+                "timestamp": time.time(),
+                "task_type": task_type,
+                "error": error
+            })
+        
+        # Save metrics to file
+        self._save_metrics()
+    
+    def log_gpu_stats(self, model_name: str) -> None:
+        """Log GPU statistics for a model."""
+        if not torch:
+            return
+            
+        if not torch.cuda.is_available():
+            return
+        
+        gpu_stats = {
+            "memory_allocated": torch.cuda.memory_allocated(),
+            "memory_reserved": torch.cuda.memory_reserved(),
+            "max_memory_allocated": torch.cuda.max_memory_allocated()
+        }
+        
+        if model_name not in self.metrics:
+            self.metrics[model_name] = {}
+        
+        self.metrics[model_name]["gpu_stats"] = gpu_stats
+        self._save_metrics()
+    
+    def get_model_performance(self, model_name: str) -> Dict[str, Any]:
+        """Get performance metrics for a specific model."""
+        return self.metrics.get(model_name, {})
+    
+    def _save_metrics(self) -> None:
+        """Save metrics to a JSON file."""
+        metrics_file = self.log_dir / "model_metrics.json"
+        with open(metrics_file, "w") as f:
+            json.dump(self.metrics, f, indent=2)
+
+def timed_execution(func: Callable) -> Callable:
+    """Decorator to time function execution."""
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        try:
+            result = func(*args, **kwargs)
+            duration = time.time() - start_time
+            return result, duration
+        except Exception as e:
+            duration = time.time() - start_time
+            raise e
+    return wrapper
+
+def estimate_tokens(text: str) -> int:
+    """Roughly estimate the number of tokens in a text."""
+    # Simple estimation: ~4 characters per token
+    return len(text) // 4
+
+def get_system_info() -> Dict[str, Any]:
+    """Get system information for logging."""
+    info = {}
+    
+    if psutil:
+        info.update({
+            "cpu_percent": psutil.cpu_percent(),
+            "memory_percent": psutil.virtual_memory().percent,
+            "memory_available": psutil.virtual_memory().available
+        })
+    
+    if torch and torch.cuda.is_available():
+        info["gpu"] = {
+            "name": torch.cuda.get_device_name(),
+            "memory_allocated": torch.cuda.memory_allocated(),
+            "memory_reserved": torch.cuda.memory_reserved()
+        }
+    
+    return info

@@ -1,8 +1,13 @@
 from typing import Dict, List, Any, Optional, Union
 import logging
-import yaml
 from pathlib import Path
 import json
+
+# Optional dependencies with fallbacks
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 from .data_processing.data_loader import DataLoader
 from .data_processing.image_annotator import ImageAnnotator
@@ -10,43 +15,102 @@ from .instruction_generation.answer_extractor import AnswerExtractor
 from .instruction_generation.question_generator import QuestionGenerator
 from .instruction_generation.self_instruct import SelfInstructGenerator
 from .quality_control.quality_filter import QualityFilter
+from .utils.helpers import (
+    setup_logging,
+    ModelMetricsLogger,
+    timed_execution,
+    estimate_tokens,
+    merge_configs,
+    validate_config
+)
 
 logger = logging.getLogger(__name__)
 
 class InstructionDataGenerator:
     """Main agent class for generating instruction data from various input sources."""
     
-    def __init__(self, config_path: str):
+    def __init__(
+        self,
+        config_path: str,
+        model_name: Optional[str] = None,
+        log_dir: Optional[str] = None,
+        model_instance: Optional[Any] = None
+    ):
         """
         Initialize the instruction data generator agent.
         
         Args:
             config_path: Path to configuration file
+            model_name: Optional name of the LLM model to use (must be defined in model_config.yaml)
+            log_dir: Optional directory for logging
+            model_instance: Optional pre-configured model instance to use instead of loading from config
         """
+        if not yaml:
+            raise ImportError("PyYAML is required for configuration handling")
+            
         config_dir = Path(config_path).parent
-        self.config = self._load_config(
+        self.config = merge_configs(
             config_path,
             config_dir / "model_config.yaml",
             env_file=config_dir / ".env"
         )
         
-        # Initialize components
+        # Validate configuration
+        required_config_sections = [
+            "models",
+            "agent",
+            "data_processing",
+            "instruction_generation",
+            "quality_control"
+        ]
+        if not validate_config(self.config, required_config_sections):
+            raise ValueError("Invalid configuration")
+        
+        # Set up logging
+        setup_logging(log_dir or "logs")
+        self.metrics_logger = ModelMetricsLogger(log_dir)
+        
+        # Validate model selection if no instance provided
+        if not model_instance and model_name:
+            if model_name not in self.config["models"]["llm_models"]:
+                raise ValueError(f"Model {model_name} not found in configuration")
+            logger.info(f"Using {model_name} for instruction generation")
+        
+        # Initialize components with selected model or instance
         self.data_loader = DataLoader(self.config)
         self.image_annotator = ImageAnnotator(self.config)
         self.answer_extractor = AnswerExtractor(self.config)
-        self.question_generator = QuestionGenerator(self.config)
-        self.self_instruct = SelfInstructGenerator(self.config)
+        self.question_generator = QuestionGenerator(self.config, model_name, model_instance)
+        self.self_instruct = SelfInstructGenerator(self.config, model_name, model_instance)
         self.quality_filter = QualityFilter(self.config)
         
-    def _load_config(self, *config_paths: Union[str, Path], env_file: Optional[Path] = None) -> Dict[str, Any]:
-        """Load and merge configuration from YAML files and environment variables."""
-        try:
-            from utils.helpers import merge_configs
-            return merge_configs(*config_paths, env_file=env_file)
-        except Exception as e:
-            logger.error(f"Error loading configuration: {e}")
-            raise
+        # Track current model
+        self.current_model = model_name if not model_instance else "custom_model"
     
+    def switch_model(self, model_name: str) -> None:
+        """
+        Switch to a different LLM model.
+        
+        Args:
+            model_name: Name of the model to switch to
+        """
+        if model_name not in self.config["models"]["llm_models"]:
+            raise ValueError(f"Model {model_name} not found in configuration")
+            
+        # Update components with new model
+        self.question_generator = QuestionGenerator(self.config, model_name)
+        self.self_instruct = SelfInstructGenerator(self.config, model_name)
+        self.current_model = model_name
+        
+        logger.info(f"Switched to model: {model_name}")
+    
+    def get_model_performance(self) -> Dict[str, Any]:
+        """Get performance metrics for current model."""
+        if not self.current_model:
+            return {}
+        return self.metrics_logger.get_model_performance(self.current_model)
+    
+    @timed_execution
     def generate_instruction_data(self, input_dir: str, output_dir: str) -> None:
         """
         Generate instruction data from input directory.
@@ -70,6 +134,19 @@ class InstructionDataGenerator:
             # Combine and filter all QA pairs
             all_qa_pairs = text_qa_pairs + image_qa_pairs
             
+            # Log model performance
+            if self.current_model:
+                self.metrics_logger.log_model_usage(
+                    model_name=self.current_model,
+                    task_type="instruction_generation",
+                    duration=0.0,  # Will be updated by decorator
+                    input_tokens=sum(estimate_tokens(str(data)) for data in input_data.values()),
+                    output_tokens=sum(estimate_tokens(str(pair)) for pair in all_qa_pairs),
+                    success=True
+                )
+                # Log GPU stats if available
+                self.metrics_logger.log_gpu_stats(self.current_model)
+            
             # Save intermediate results if configured
             if self.config["agent"]["output"]["save_intermediate"]:
                 self._save_intermediate_results(all_qa_pairs, output_path)
@@ -80,7 +157,25 @@ class InstructionDataGenerator:
             logger.info(f"Generated {len(all_qa_pairs)} instruction pairs")
             
         except Exception as e:
+            if self.current_model:
+                self.metrics_logger.log_model_usage(
+                    model_name=self.current_model,
+                    task_type="instruction_generation",
+                    duration=0.0,  # Will be updated by decorator
+                    input_tokens=0,
+                    output_tokens=0,
+                    success=False,
+                    error=str(e)
+                )
             logger.error(f"Error generating instruction data: {e}")
+            raise
+    
+    def _load_config(self, *config_paths: Union[str, Path], env_file: Optional[Path] = None) -> Dict[str, Any]:
+        """Load and merge configuration from YAML files and environment variables."""
+        try:
+            return merge_configs(*config_paths, env_file=env_file)
+        except Exception as e:
+            logger.error(f"Error loading configuration: {e}")
             raise
     
     def _process_text_data(self, text_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

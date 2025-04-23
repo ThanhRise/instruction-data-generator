@@ -1,4 +1,4 @@
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import logging
 import torch
 import re
@@ -12,61 +12,29 @@ logger = logging.getLogger(__name__)
 class QuestionGenerator:
     """Generates questions based on extracted answers and their contexts."""
     
-    def __init__(self, config: Dict[str, Any]):
-        """Initialize question generator."""
+    def __init__(self, config: Dict[str, Any], model_name: Optional[str] = None, model_instance: Optional[Any] = None):
+        """
+        Initialize question generator.
+        
+        Args:
+            config: Configuration dictionary
+            model_name: Optional specific model to use instead of default
+            model_instance: Optional pre-configured model instance to use instead of loading from config
+        """
         self.config = config
-        self.model_name = config["models"]["question_generation"]["name"]
-        self.params = config["models"]["question_generation"]["parameters"]
+        self.model_name = model_name if not model_instance else "custom_model"
         
         logger.info(f"Initializing question generator with model: {self.model_name}")
         
-        if "t5" in self.model_name.lower():
-            self.model = self._load_t5_model()
-            self.model_type = "t5"
-        elif "gpt" in self.model_name.lower() or "phi" in self.model_name.lower():
-            self.model = self._load_llm_model()
-            self.model_type = "llm"
-        else:
-            raise ValueError(f"Unsupported question generation model: {self.model_name}")
+        # Initialize model loader
+        from ..models.model_loader import ModelLoader
+        self.model_loader = ModelLoader(config)
+        
+        # Load model components
+        self.model = self.model_loader.get_model("question_generation", model_name, model_instance)
         
         # Load templates
         self.question_templates = self._load_question_templates()
-    
-    def _load_t5_model(self):
-        """Load T5 model for question generation."""
-        try:
-            model_id = "flan-t5-xxl" if "flan-t5-xxl" in self.model_name else "t5-large"
-            tokenizer = AutoTokenizer.from_pretrained(f"google/{model_id}")
-            model = AutoModelForSeq2SeqLM.from_pretrained(
-                f"google/{model_id}",
-                torch_dtype=torch.float16,
-                device_map="auto"
-            )
-            return {"model": model, "tokenizer": tokenizer}
-        except Exception as e:
-            logger.error(f"Error loading T5 model: {e}")
-            raise
-    
-    def _load_llm_model(self):
-        """Load LLM model for question generation."""
-        try:
-            if "gpt-4o" in self.model_name:
-                from langchain_openai import ChatOpenAI
-                model = ChatOpenAI(
-                    model_name="gpt-4o",
-                    temperature=self.params.get("temperature", 0.8)
-                )
-            elif "phi-3.5" in self.model_name:
-                from langchain_huggingface import HuggingFaceEndpoint
-                model = HuggingFaceEndpoint(
-                    repo_id="microsoft/phi-3.5-instruct",
-                    temperature=self.params.get("temperature", 0.8),
-                    max_new_tokens=self.params.get("max_new_tokens", 150)
-                )
-            return {"model": model}
-        except Exception as e:
-            logger.error(f"Error loading LLM model: {e}")
-            raise
     
     def _load_question_templates(self) -> Dict[str, List[str]]:
         """Load templates for different types of questions."""
@@ -92,15 +60,7 @@ class QuestionGenerator:
         }
     
     def generate_questions(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Generate questions based on extracted answers and their contexts.
-        
-        Args:
-            data: Dictionary containing answers, contexts, and document information
-            
-        Returns:
-            List of generated QA pairs
-        """
+        """Generate questions based on extracted answers and their contexts."""
         qa_pairs = []
         
         try:
@@ -117,7 +77,10 @@ class QuestionGenerator:
                 doc_type = answer_item.get("document_type", "")
                 has_visual = answer_item.get("has_visual_context", False)
                 
-                # Generate questions based on content type
+                # Generate questions based on model type
+                model_dict = self.model
+                model_type = next(iter(model_dict["model"].__class__.__module__.split(".")))
+                
                 if has_visual and "visual" in answer_type.lower():
                     questions = self._generate_visual_questions(
                         answer,
@@ -126,16 +89,32 @@ class QuestionGenerator:
                         answer_type
                     )
                 else:
-                    # Generate regular questions
-                    if self.model_type == "t5":
-                        questions = self._generate_with_t5(answer, context)
-                    else:
-                        questions = self._generate_with_llm(
+                    if model_type == "vllm":
+                        questions = self._generate_with_vllm(
+                            model_dict["model"],
+                            model_dict["sampling_params"],
                             answer,
                             context,
                             answer_type,
                             doc_type
                         )
+                    elif model_type in ["langchain", "openai"]:
+                        questions = self._generate_with_llm(
+                            model_dict["model"],
+                            answer,
+                            context,
+                            answer_type,
+                            doc_type
+                        )
+                    elif model_type == "transformers":
+                        questions = self._generate_with_transformers(
+                            model_dict["model"],
+                            model_dict["tokenizer"],
+                            answer,
+                            context
+                        )
+                    else:
+                        questions = self._generate_with_t5(answer, context)
                 
                 # Validate and add QA pairs
                 for question in questions:
@@ -147,7 +126,8 @@ class QuestionGenerator:
                             "answer_type": answer_type,
                             "context": context,
                             "document_type": doc_type,
-                            "has_visual_context": has_visual
+                            "has_visual_context": has_visual,
+                            "model_used": self.model_name or "default"
                         })
             
             return qa_pairs
@@ -155,7 +135,7 @@ class QuestionGenerator:
         except Exception as e:
             logger.error(f"Error generating questions: {e}")
             return []
-    
+
     def _generate_visual_questions(
         self,
         answer: str,
@@ -186,91 +166,92 @@ class QuestionGenerator:
                 )
                 questions.append(question)
             
-            # Generate additional questions using LLM
-            if self.model_type == "llm":
-                prompt = PromptTemplate(
-                    template=(
-                        "Generate a question about the visual content described in the following text. "
-                        "The question should focus on what can be seen or understood from the visual element.\n\n"
-                        "Visual description: {answer}\n"
-                        "Document type: {doc_type}\n"
-                        "Context: {context}\n\n"
-                        "Generate a clear and specific question:"
-                    ),
-                    input_variables=["answer", "doc_type", "context"]
-                )
-                
-                llm_response = self.model["model"](
-                    prompt.format(
-                        answer=answer,
-                        doc_type=doc_type,
-                        context=context
-                    )
-                )
-                
-                # Extract question from response
-                if "?" in llm_response:
-                    question = re.search(r'^.*?\?', llm_response)
-                    if question:
-                        questions.append(question.group(0))
-            
             return questions[:3]  # Limit to 3 questions
             
         except Exception as e:
             logger.error(f"Error generating visual questions: {e}")
             return []
-    
-    def _generate_with_t5(self, answer: str, context: str) -> List[str]:
-        """Generate questions using T5 model."""
+
+    def _generate_with_vllm(
+        self,
+        model: Any,
+        sampling_params: Any,
+        answer: str,
+        context: str,
+        answer_type: str,
+        doc_type: str = ""
+    ) -> List[str]:
+        """Generate questions using vLLM model."""
         try:
-            model = self.model["model"]
-            tokenizer = self.model["tokenizer"]
+            # Prepare prompt
+            if doc_type:
+                prompt = self._get_document_prompt(
+                    context,
+                    answer,
+                    answer_type,
+                    doc_type
+                )
+            else:
+                prompt = self._get_standard_prompt(context, answer)
             
-            # Prepare input text
-            input_text = f"answer: {answer} context: {context}"
+            # Generate completions
+            outputs = model.generate([prompt], sampling_params)
             
-            # Tokenize input
+            # Extract questions
+            questions = []
+            for output in outputs:
+                generated_text = output.outputs[0].text
+                questions.extend(self._extract_questions(generated_text))
+            
+            return questions[:3]  # Limit to 3 questions
+            
+        except Exception as e:
+            logger.error(f"Error generating questions with vLLM: {e}")
+            return []
+
+    def _generate_with_transformers(
+        self,
+        model: Any,
+        tokenizer: Any,
+        answer: str,
+        context: str
+    ) -> List[str]:
+        """Generate questions using Hugging Face transformers model."""
+        try:
+            prompt = self._get_standard_prompt(context, answer)
+            
             inputs = tokenizer(
-                input_text,
+                prompt,
                 return_tensors="pt",
                 max_length=512,
                 truncation=True
             ).to(model.device)
             
-            # Generate questions
             with torch.no_grad():
                 outputs = model.generate(
                     inputs["input_ids"],
-                    max_new_tokens=self.params.get("max_new_tokens", 150),
+                    max_new_tokens=150,
                     num_return_sequences=3,
-                    temperature=self.params.get("temperature", 0.8),
-                    top_p=self.params.get("top_p", 0.95),
+                    temperature=0.8,
+                    top_p=0.95,
                     do_sample=True
                 )
             
-            # Decode and clean up questions
+            # Decode and process outputs
             questions = []
             for output in outputs:
-                question = tokenizer.decode(output, skip_special_tokens=True)
-                
-                # Remove prefixes and clean up
-                question = re.sub(r'^(answer:|context:)\s*', '', question, flags=re.IGNORECASE)
-                
-                # Ensure proper formatting
-                if not question.strip().endswith('?'):
-                    question = question.strip() + '?'
-                question = question[0].upper() + question[1:]
-                
-                questions.append(question)
+                decoded = tokenizer.decode(output, skip_special_tokens=True)
+                questions.extend(self._extract_questions(decoded))
             
             return questions
             
         except Exception as e:
-            logger.error(f"Error generating questions with T5: {e}")
+            logger.error(f"Error generating questions with transformers: {e}")
             return []
-    
+
     def _generate_with_llm(
         self,
+        model: Any,
         answer: str,
         context: str,
         answer_type: str,
@@ -278,8 +259,6 @@ class QuestionGenerator:
     ) -> List[str]:
         """Generate questions using LLM model."""
         try:
-            model = self.model["model"]
-            
             # Prepare prompt based on content type
             if doc_type:
                 prompt_template = PromptTemplate(
@@ -330,10 +309,7 @@ class QuestionGenerator:
                 )
             
             # Generate questions
-            if "gpt-4o" in self.model_name:
-                response = model.predict(prompt)
-            else:
-                response = model(prompt)
+            response = model(prompt)
             
             # Extract questions from response
             questions = []
@@ -361,7 +337,103 @@ class QuestionGenerator:
         except Exception as e:
             logger.error(f"Error generating questions with LLM: {e}")
             return []
-    
+
+    def _generate_with_t5(self, answer: str, context: str) -> List[str]:
+        """Generate questions using T5 model."""
+        try:
+            model = self.model["model"]
+            tokenizer = self.model["tokenizer"]
+            
+            # Prepare input text
+            input_text = f"answer: {answer} context: {context}"
+            
+            # Tokenize input
+            inputs = tokenizer(
+                input_text,
+                return_tensors="pt",
+                max_length=512,
+                truncation=True
+            ).to(model.device)
+            
+            # Generate questions
+            with torch.no_grad():
+                outputs = model.generate(
+                    inputs["input_ids"],
+                    max_new_tokens=self.params.get("max_new_tokens", 150),
+                    num_return_sequences=3,
+                    temperature=self.params.get("temperature", 0.8),
+                    top_p=self.params.get("top_p", 0.95),
+                    do_sample=True
+                )
+            
+            # Decode and clean up questions
+            questions = []
+            for output in outputs:
+                question = tokenizer.decode(output, skip_special_tokens=True)
+                
+                # Remove prefixes and clean up
+                question = re.sub(r'^(answer:|context:)\s*', '', question, flags=re.IGNORECASE)
+                
+                # Ensure proper formatting
+                if not question.strip().endswith('?'):
+                    question = question.strip() + '?'
+                question = question[0].upper() + question[1:]
+                
+                questions.append(question)
+            
+            return questions
+            
+        except Exception as e:
+            logger.error(f"Error generating questions with T5: {e}")
+            return []
+
+    def _get_standard_prompt(self, context: str, answer: str) -> str:
+        """Get standard question generation prompt."""
+        return self.config["models"]["prompts"]["question_generation"]["base_template"].format(
+            context=context,
+            answer=answer
+        )
+
+    def _get_document_prompt(
+        self,
+        context: str,
+        answer: str,
+        answer_type: str,
+        doc_type: str
+    ) -> str:
+        """Get document-specific question generation prompt."""
+        return self.config["models"]["prompts"]["document_question"]["base_template"].format(
+            doc_type=doc_type,
+            content=context,
+            focus=answer,
+            section=answer_type
+        )
+
+    def _extract_questions(self, text: str) -> List[str]:
+        """Extract questions from generated text."""
+        questions = []
+        lines = text.strip().split('\n')
+        
+        for line in lines:
+            # Clean up numbered lists or bullet points
+            line = re.sub(r'^[\d\-\.\)]+\s*', '', line.strip())
+            if line and '?' in line:
+                # Extract the question part
+                question = re.search(r'^.*?\?', line)
+                if question:
+                    questions.append(question.group(0).strip())
+        
+        # Post-process questions
+        processed = []
+        for question in questions:
+            # Ensure proper formatting
+            if not question.strip().endswith('?'):
+                question = question.strip() + '?'
+            question = question[0].upper() + question[1:]
+            processed.append(question)
+        
+        return processed
+
     def _validate_question(self, question: str, answer: str, context: str) -> bool:
         """Validate generated question."""
         # Basic validation
