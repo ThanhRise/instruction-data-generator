@@ -85,6 +85,28 @@ class DataLoader:
         
         return processed_data
     
+    def load_data(self, input_dir: str) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Load and process input data from the specified directory.
+        Returns a list of processed documents with unified content (text + image content).
+        """
+        try:
+            # Update input directory if specified
+            if input_dir:
+                self.input_dir = Path(input_dir)
+            
+            # Load all documents
+            documents = self.load_documents()
+            
+            # Return unified document list - no longer separating by type
+            return {
+                "documents": documents,  # Each document now contains unified text content
+            }
+            
+        except Exception as e:
+            logger.error(f"Error loading data from {input_dir}: {e}")
+            raise
+    
     def _get_input_files(self) -> List[Path]:
         """Get list of input files to process."""
         files = []
@@ -119,61 +141,22 @@ class DataLoader:
     def _process_document(self, file_path: Path) -> Optional[Dict[str, Any]]:
         """Process a single document."""
         try:
-            # Process based on file type
-            if file_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".bmp"}:
-                # Handle image files
-                return self._process_image_file(file_path)
-            else:
-                # Handle document files
-                return self._process_doc_file(file_path)
-                
-        except Exception as e:
-            logger.error(f"Error processing document {file_path}: {e}")
-            return None
-    
-    def _process_image_file(self, file_path: Path) -> Dict[str, Any]:
-        """Process an image file."""
-        from PIL import Image
-        
-        try:
-            # Load image
-            with Image.open(file_path) as img:
-                # Create document data
-                doc_data = {
-                    "source": str(file_path),
-                    "type": "image",
-                    "format": file_path.suffix.lower()[1:],
-                    "image": img.copy(),
-                    "metadata": {
-                        "size": img.size,
-                        "mode": img.mode
-                    }
-                }
-                
-                return doc_data
-                
-        except Exception as e:
-            logger.error(f"Error processing image {file_path}: {e}")
-            return None
-    
-    def _process_doc_file(self, file_path: Path) -> Dict[str, Any]:
-        """Process a document file."""
-        try:
-            # Extract content using document processor
+            # Process document using DocumentProcessor
             doc_content = self.doc_processor.process_document(file_path)
             
-            # Create document data
-            doc_data = {
+            # Create unified document data
+            return {
                 "source": str(file_path),
-                "type": "document",
+                "type": "document",  # No longer distinguishing between text/image
                 "format": file_path.suffix.lower()[1:],
-                "content": doc_content["text"],
-                "images": doc_content["images"],
-                "relationships": doc_content["relationships"]
+                "content": doc_content["text"],  # This now contains both text and processed image content
+                "metadata": {
+                    "has_images": len(doc_content["images"]) > 0,
+                    "original_images": [img.get("id") for img in doc_content["images"]],
+                    "relationships": doc_content["relationships"]
+                }
             }
-            
-            return doc_data
-            
+                
         except Exception as e:
             logger.error(f"Error processing document {file_path}: {e}")
             return None

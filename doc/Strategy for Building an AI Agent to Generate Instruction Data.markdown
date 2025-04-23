@@ -11,10 +11,26 @@ The objective is to develop an AI Agent capable of generating instruction data i
   - Instruction data (questions and answers) must be generated solely from the input data, without using external information.
   - The AI Agent must handle multimodal data (text, images, etc.).
   - Utilize the most advanced technologies and techniques available in 2025.
+  - **Instruction Data Structure**: Each generated instruction data sample must contain three fields: **Question**, **Answer**, and **Instruction for Answering**. The "Instruction for Answering" field provides guidance or context on how to answer the question. If the input question is itself an instruction request, this field can be left blank.
 - **Challenges**:
   - Ensuring no external information is used when leveraging pre-trained models.
   - Efficiently processing multimodal data.
   - Generating high-quality, diverse instruction data suitable for LLM training.
+  - **Comprehensive Extraction**: For input sources such as PDF, DOC, and PPT files, which may contain both text and images, it is essential to fully extract and process all content—including text embedded in images—to ensure complete information is available for instruction data generation.
+
+## Supported Input Sources
+
+- The AI Agent must support creating instruction data from a variety of document formats, including but not limited to **PDF**, **DOC**, and **PPT** files.
+- These documents may contain both textual and visual (image) content. The system must:
+  - Extract all text content from the documents.
+  - Extract and process all images, including performing OCR or image captioning to convert image content into text.
+  - Integrate extracted image content with the document's text to form a unified representation for downstream instruction data generation.
+
+## Model and Platform Flexibility
+
+- The models and frameworks used for question generation, answer extraction, image content extraction, and instruction data creation should be **flexible and modular**.
+- Both open-source and proprietary models can be utilized, and the system should support running on various platforms, such as **vLLM**, **Transformers**, **LangChain**, **OpenAI APIs**, and others.
+- This flexibility ensures adaptability to different deployment environments and allows leveraging the best available tools for each sub-task.
 
 ## Overall Strategy
 
@@ -33,14 +49,15 @@ The strategy is divided into key phases:
 - **Objective**: Convert input data (text, images, etc.) into a unified text format for instruction data generation.
 - **Methods**:
   - **Text**: Store input text directly without additional processing.
-  - **Images**: Use an image captioning model to generate textual descriptions.
+  - **Images**: Use an image captioning model or OCR to generate textual descriptions from images.
     - **Recommended Model**: BLIP-2 or Phi-3.5-vision-instruct, advanced multimodal models in 2025 capable of generating detailed and accurate captions.
     - **Rationale**: These models are trained on diverse datasets, enabling them to produce contextually relevant descriptions.
-  - **Output**: A text dataset comprising original text and captions derived from images.
+  - **Document Files (PDF, DOC, PPT)**: Extract all text and images from documents. For images, apply OCR or captioning to ensure all embedded information is captured as text.
+  - **Output**: A text dataset comprising original text and captions or OCR results derived from images, ensuring all content from input sources is represented.
 
 ### Step 2: Instruction Data Generation
 
-- **Objective**: Generate question-answer pairs from the processed text data.
+- **Objective**: Generate question-answer-instruction triplets from the processed text data.
 - **Key Techniques**:
   - **Two-Stage Method** (Automating Reading Comprehension):
     1. **Answer Extraction**: Identify phrases or text segments that can serve as answers.
@@ -50,35 +67,37 @@ The strategy is divided into key phases:
        - **Tools**: Use sequence-to-sequence models like T5 or FLAN-T5, enhanced with linguistic features (POS tags, dependency labels).
        - **Prompt**: To prevent external information usage, use prompts like: “Generate a question that can only be answered using the following text: \[text segment\].”
        - **Recommended Model**: GPT-4o for high-quality synthetic data generation, or Phi-3.5-instruct as an open-source alternative.
+    3. **Instruction for Answering**: For each question, generate an instruction or guideline on how to answer it, based on the context. If the question is itself an instruction request, this field can be left blank.
   - **Self-Instruct Method** (Self-Instruct Paper):
-    - Create a small seed set of question-answer pairs from the input data, either manually or automatically (based on syntactic patterns).
-    - Use a model like GPT-4o to generate additional question-answer pairs based on the seed set, with prompts restricting usage to input data only.
+    - Create a small seed set of question-answer-instruction triplets from the input data, either manually or automatically (based on syntactic patterns).
+    - Use a model like GPT-4o to generate additional triplets based on the seed set, with prompts restricting usage to input data only.
     - **Rationale**: This method allows flexible and efficient scaling of instruction data.
-- **Handling Multimodal Data**:
-  - For images, use captions generated in Step 1 as text input.
-  - Apply the same question-answer pair generation process as for original text.
-  - Example: If a caption is “A cat is sitting on a chair,” a question like “What animal is sitting on the chair?” can be generated with the answer “A cat.”
+- **Handling Multimodal Data and Documents**:
+  - For images and image content extracted from documents, use captions or OCR results as text input.
+  - Apply the same question-answer-instruction generation process as for original text.
+  - Example: If a caption is “A cat is sitting on a chair,” a question like “What animal is sitting on the chair?” can be generated with the answer “A cat” and an instruction such as “Identify the animal mentioned in the description.”
 
 ### Step 3: Quality Assurance and Constraint Compliance
 
 - **Quality Control**:
-  - **Automated Metrics**: Use metrics like BLEU, ROUGE-L, and METEOR to evaluate the quality of question-answer pairs (Automating Reading Comprehension).
+  - **Automated Metrics**: Use metrics like BLEU, ROUGE-L, and METEOR to evaluate the quality of question-answer-instruction triplets (Automating Reading Comprehension).
   - **Relevance Check**: Verify that questions can be answered using the input text by comparing with the original content.
-  - **Diversity**: Employ techniques like rejection sampling to generate diverse question-answer pairs (The Large Language Model Course).
+  - **Diversity**: Employ techniques like rejection sampling to generate diverse instruction data (The Large Language Model Course).
 - **Avoiding External Information**:
   - During answer extraction, use span-based methods like Pointer Networks to ensure answers are directly sourced from the input.
-  - During question generation, use specific prompts to restrict the model to the provided context.
+  - During question and instruction generation, use specific prompts to restrict the model to the provided context.
 - **Handling Edge Cases**:
   - For sparse or contextually limited input data, use paraphrased versions of the text, ensuring no new information is introduced.
 
 ### Step 4: Integration of Advanced 2025 Technologies
 
 - **Models Used**:
-  - **Image Captioning**: BLIP-2 or Phi-3.5-vision-instruct for multimodal processing capabilities.
-  - **Question-Answer Generation**:
+  - **Image Captioning/OCR**: BLIP-2, Phi-3.5-vision-instruct, or other flexible models for multimodal processing and OCR capabilities.
+  - **Question-Answer-Instruction Generation**:
     - GPT-4o for high-quality synthetic data generation.
     - Phi-3.5-instruct as a robust open-source option for instruction-based tasks.
     - T5/FLAN-T5 for domain-specific question generation tasks.
+    - The system should support running these models on various platforms (vLLM, Transformers, LangChain, OpenAI, etc.).
 - **Advanced Techniques**:
   - **Synthetic Data Generation**: Use GPT-4o to generate instruction-response pairs based on seed data from the input (The Large Language Model Course).
   - **Data Augmentation**: Apply techniques like verified outputs, multiple responses with rejection sampling, or Chain-of-Thought to enhance quality (The Large Language Model Course).
@@ -86,12 +105,13 @@ The strategy is divided into key phases:
 ### Step 5: AI Agent Development
 
 - **Architecture**:
-  - **Component 1: Data Loader**: Handles input data (text, images) and integrates image captioning models.
+  - **Component 1: Data Loader**: Handles input data (text, images, PDF, DOC, PPT) and integrates image captioning/OCR models.
   - **Component 2: Answer Extractor**: Uses NER or Pointer Networks to identify text segments as answers.
-  - **Component 3: Question Generator**: Employs sequence-to-sequence models or GPT-4o to generate questions based on answers and context.
+  - **Component 3: Question & Instruction Generator**: Employs sequence-to-sequence models or GPT-4o to generate questions and instructions based on answers and context.
   - **Component 4: Quality Filter**: Applies automated metrics and relevance checks to ensure quality.
 - **Integration**:
-  - Design a modular system for easy updates (e.g., swapping captioning models or question generation techniques).
+  - Design a modular system for easy updates (e.g., swapping captioning models, OCR engines, or question/instruction generation techniques).
+  - Ensure compatibility with multiple model frameworks and platforms.
 - **Deployment**:
   - Use cloud infrastructure (AWS, Google Cloud) to handle large-scale data processing.
   - Ensure scalability to accommodate diverse input datasets.
@@ -120,11 +140,13 @@ The strategy is divided into key phases:
 
 | **Task** | **Tool/Technique** | **Rationale** |
 | --- | --- | --- |
+| Document Parsing | PDF/DOC/PPT parsers, OCR engines | Extract all text and image content from documents for comprehensive data coverage. |
 | Image Captioning | BLIP-2, Phi-3.5-vision-instruct | Advanced multimodal models for accurate captioning (TechTarget). |
 | Answer Extraction | NER, Pointer Networks | Ensures answers are directly sourced from text (Automating Reading Comprehension). |
-| Question Generation | T5, FLAN-T5, GPT-4o with constrained prompts | Generates high-quality questions, restricted to input context (Towards Data Science). |
+| Question & Instruction Generation | T5, FLAN-T5, GPT-4o with constrained prompts | Generates high-quality questions and instructions, restricted to input context (Towards Data Science). |
 | Synthetic Data Generation | GPT-4o, Phi-3.5-instruct | Flexible and efficient for scaling data (Towards Data Science). |
 | Quality Control | BLEU, ROUGE-L, METEOR, rejection sampling | Ensures quality and diversity of data (Automating Reading Comprehension). |
+| Model/Platform Support | vLLM, Transformers, LangChain, OpenAI, etc. | Enables flexible deployment and integration with various model ecosystems. |
 
 ## Conclusion
 

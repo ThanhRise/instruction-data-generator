@@ -6,407 +6,439 @@ import torch
 import re
 from collections import defaultdict
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger(__name__)
 
 class AnswerExtractor:
-    """Extracts potential answers from text and image-related content."""
+    """Extracts potential answers from text content."""
     
     def __init__(self, config: Dict[str, Any]):
-        """
-        Initialize the answer extractor.
-        
-        Args:
-            config: Configuration dictionary
-        """
         self.config = config
+        self.extraction_config = config["agent"]["instruction_generation"]["answer_extraction"]
         
-        # Load NLP models
-        try:
-            self.nlp = spacy.load("en_core_web_lg")
-        except Exception as e:
-            logger.error(f"Error loading spaCy model: {e}")
-            self.nlp = None
-            
-        try:
-            self.ner_tokenizer = AutoTokenizer.from_pretrained("dslim/bert-base-NER")
-            self.ner_model = AutoModelForTokenClassification.from_pretrained(
-                "dslim/bert-base-NER",
-                torch_dtype=torch.float16,
-                device_map="auto"
-            )
-        except Exception as e:
-            logger.error(f"Error loading NER model: {e}")
-            self.ner_tokenizer = None
-            self.ner_model = None
-        
-        # Text splitter for chunking long texts
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=50,
-            separators=["\n\n", "\n", ". ", ", ", " ", ""]
-        )
+        # Initialize models and analyzers
+        self._initialize_components()
     
-    def extract_answers(
-        self,
-        content: Dict[str, Any],
-        context_window: int = 200
-    ) -> List[Dict[str, Any]]:
+    def _initialize_components(self):
+        """Initialize NLP components and models."""
+        try:
+            import spacy
+            self.nlp = spacy.load(self.extraction_config.get("spacy_model", "en_core_web_sm"))
+            
+            # Add special case patterns for handling structured content markers
+            ruler = self.nlp.get_pipe("attribute_ruler")
+            patterns = [
+                {"label": "VISUAL_CONTENT", "pattern": [{"TEXT": {"REGEX": r"\[(OCR Text|Image Caption|Detected Objects|Scene Description|Visual Analysis|Visual Context):"}}]},
+                {"label": "CONTENT_MARKER", "pattern": [{"TEXT": {"REGEX": r"===.*==="}}]}
+            ]
+            for pattern in patterns:
+                ruler.add([[pattern]])
+                
+            # Initialize semantic search model for content similarity
+            self.sim_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize NLP components: {e}")
+            raise
+    
+    def extract_answers(self, content: str) -> List[Dict[str, Any]]:
         """
-        Extract potential answers from content, considering both text and related images.
+        Extract potential answers from unified content.
         
         Args:
-            content: Dictionary containing text, related images, and document context
-            context_window: Number of characters to include as context around answers
+            content: Text content including both document text and image-derived information
             
         Returns:
-            List of extracted answers with their contexts and types
+            List of extracted answer candidates with metadata
         """
         answers = []
         
         try:
-            text_item = content.get("text", {})
-            text_content = text_item.get("content", "")
-            text_type = text_item.get("type", "text")
+            # Split content into sections based on visual content markers
+            sections = self._split_content_sections(content)
             
-            # Extract answers from main text
-            text_answers = self._extract_from_text(text_content)
-            
-            # Add document context to answers
-            doc_context = content.get("document_context")
-            if doc_context:
-                for answer in text_answers:
-                    answer["document_type"] = doc_context["type"]
-                    if "page" in text_item:
-                        answer["page"] = text_item["page"]
-                    elif "slide" in text_item:
-                        answer["slide"] = text_item["slide"]
-                    elif "sheet" in text_item:
-                        answer["sheet"] = text_item["sheet"]
-            
-            answers.extend(text_answers)
-            
-            # Process related images and their captions/context
-            related_images = content.get("related_images", [])
-            for img_data in related_images:
-                image = img_data.get("image", {})
-                rel_type = img_data.get("relationship_type")
+            for section in sections:
+                section_type = section["type"]
+                section_text = section["text"]
                 
-                # Extract answers that combine text and image information
-                combined_answers = self._extract_from_image_context(
-                    text_content,
-                    image,
-                    rel_type,
-                    doc_context
-                )
-                answers.extend(combined_answers)
+                if section_type == "text":
+                    # Process regular text content
+                    text_answers = self._extract_text_answers(section_text)
+                    answers.extend(text_answers)
+                    
+                elif section_type == "visual":
+                    # Process visual content sections
+                    visual_answers = self._extract_visual_answers(section_text)
+                    answers.extend(visual_answers)
+                    
+                elif section_type == "combined":
+                    # Process sections with both text and visual content
+                    combined_answers = self._extract_combined_answers(section_text)
+                    answers.extend(combined_answers)
             
-            # Add source and location context
-            for answer in answers:
-                answer["source"] = text_item.get("source", "unknown")
-                if "context" not in answer:
-                    answer["context"] = self._get_context(
-                        text_content,
-                        answer["answer"],
-                        context_window
-                    )
+            # Filter and rank answers
+            answers = self._filter_answers(answers)
+            answers = self._rank_answers(answers)
             
-            return answers
+            return answers[:self.extraction_config["max_answers"]]
             
         except Exception as e:
-            logger.error(f"Error extracting answers: {e}")
+            logger.error(f"Answer extraction failed: {e}")
             return []
     
-    def _extract_from_text(self, text: str) -> List[Dict[str, Any]]:
-        """Extract answers from text content."""
+    def _split_content_sections(self, content: str) -> List[Dict[str, Any]]:
+        """Split content into sections based on content type."""
+        sections = []
+        current_section = {"type": "text", "text": []}
+        
+        for line in content.split("\n"):
+            if line.strip():
+                if line.startswith("[") and any(
+                    marker in line 
+                    for marker in ["OCR Text:", "Image Caption:", "Detected Objects:", 
+                                 "Scene Description:", "Visual Analysis:", "Visual Context:"]
+                ):
+                    # Save previous section if it has content
+                    if current_section["text"]:
+                        sections.append({
+                            "type": current_section["type"],
+                            "text": "\n".join(current_section["text"])
+                        })
+                    
+                    # Start new visual section
+                    current_section = {"type": "visual", "text": [line]}
+                    
+                elif line.startswith("==="):
+                    # Save previous section if it has content
+                    if current_section["text"]:
+                        sections.append({
+                            "type": current_section["type"],
+                            "text": "\n".join(current_section["text"])
+                        })
+                    
+                    # Start new section based on marker
+                    if "Visual Content" in line:
+                        current_section = {"type": "visual", "text": []}
+                    else:
+                        current_section = {"type": "text", "text": []}
+                        
+                else:
+                    # If mixing visual and text content, update section type
+                    if current_section["type"] == "text" and "[Visual Context:" in line:
+                        current_section["type"] = "combined"
+                    current_section["text"].append(line)
+        
+        # Add final section
+        if current_section["text"]:
+            sections.append({
+                "type": current_section["type"],
+                "text": "\n".join(current_section["text"])
+            })
+        
+        return sections
+    
+    def _extract_text_answers(self, text: str) -> List[Dict[str, Any]]:
+        """Extract answer candidates from regular text content."""
         answers = []
+        doc = self.nlp(text)
         
-        try:
-            if not text.strip():
-                return answers
-                
-            # Extract named entities
-            if self.ner_model and self.ner_tokenizer:
-                entities = self._extract_entities(text)
-                answers.extend(entities)
-            
-            # Extract key phrases and sentences using spaCy
-            if self.nlp:
-                doc = self.nlp(text)
-                
-                # Extract noun phrases
-                for chunk in doc.noun_chunks:
-                    if len(chunk.text.split()) > 1:  # Multi-word phrases only
-                        answers.append({
-                            "answer": chunk.text,
-                            "type": "noun_phrase",
-                            "confidence": 0.7
-                        })
-                
-                # Extract key sentences
-                for sent in doc.sents:
-                    # Filter important sentences (containing entities or key information)
-                    if (len(sent.ents) > 0 or
-                        any(token.pos_ in ["VERB", "NUM"] for token in sent) and
-                        len(sent.text.split()) >= 5):
-                        answers.append({
-                            "answer": sent.text,
-                            "type": "key_sentence",
-                            "confidence": 0.8
-                        })
-                
-                # Extract numerical facts
-                number_patterns = self._extract_numerical_facts(doc)
-                answers.extend(number_patterns)
-            
-            return answers
-            
-        except Exception as e:
-            logger.error(f"Error in text extraction: {e}")
-            return []
-    
-    def _extract_from_image_context(
-        self,
-        text: str,
-        image: Dict[str, Any],
-        relationship_type: str,
-        doc_context: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """Extract answers that combine image and text information."""
-        answers = []
-        
-        try:
-            # Extract image-specific information
-            image_type = image.get("type", "")
-            
-            # Handle different types of image-text relationships
-            if relationship_type == "page_content":
-                # For PDF pages, focus on visual elements mentioned in text
-                answers.extend(self._extract_visual_references(text))
-                
-            elif relationship_type == "slide_content":
-                # For PowerPoint slides, extract bullet points and visual descriptions
-                answers.extend(self._extract_slide_content(text))
-                
-            elif relationship_type == "embedded_content":
-                # For embedded images, find direct references to the image
-                answers.extend(self._extract_image_references(text))
-            
-            # Add image context to answers
-            for answer in answers:
-                answer["has_visual_context"] = True
-                answer["image_type"] = image_type
-                if doc_context:
-                    answer["document_type"] = doc_context["type"]
-            
-            return answers
-            
-        except Exception as e:
-            logger.error(f"Error in image-context extraction: {e}")
-            return []
-    
-    def _extract_entities(self, text: str) -> List[Dict[str, Any]]:
-        """Extract named entities using BERT-NER."""
-        entities = []
-        
-        try:
-            # Tokenize and get predictions
-            inputs = self.ner_tokenizer(
-                text,
-                return_tensors="pt",
-                truncation=True,
-                max_length=512
-            ).to(self.ner_model.device)
-            
-            with torch.no_grad():
-                outputs = self.ner_model(**inputs)
-            
-            # Process predictions
-            predictions = outputs.logits.argmax(-1)[0].tolist()
-            tokens = self.ner_tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
-            
-            current_entity = {"text": "", "type": "", "confidence": 0.0}
-            
-            for token, pred in zip(tokens, predictions):
-                # Convert prediction ID to label
-                label = self.ner_model.config.id2label[pred]
-                
-                if label.startswith("B-"):
-                    # Start of new entity
-                    if current_entity["text"]:
-                        entities.append({
-                            "answer": current_entity["text"].strip(),
-                            "type": "named_entity",
-                            "entity_type": current_entity["type"],
-                            "confidence": current_entity["confidence"]
-                        })
-                    
-                    current_entity = {
-                        "text": token.replace("#", ""),
-                        "type": label[2:],
-                        "confidence": 0.9
-                    }
-                    
-                elif label.startswith("I-") and current_entity["text"]:
-                    # Inside an entity
-                    current_entity["text"] += " " + token.replace("#", "")
-                    
-                elif current_entity["text"]:
-                    # End of entity
-                    entities.append({
-                        "answer": current_entity["text"].strip(),
-                        "type": "named_entity",
-                        "entity_type": current_entity["type"],
-                        "confidence": current_entity["confidence"]
+        # Extract named entities
+        if self.extraction_config["extract_entities"]:
+            for ent in doc.ents:
+                if ent.label_ in self.extraction_config["entity_types"]:
+                    answers.append({
+                        "text": ent.text,
+                        "type": "entity",
+                        "subtype": ent.label_,
+                        "score": 1.0,
+                        "source": "text",
+                        "context": text[max(0, ent.start_char - 100):min(len(text), ent.end_char + 100)]
                     })
-                    current_entity = {"text": "", "type": "", "confidence": 0.0}
-            
-            # Add last entity if exists
-            if current_entity["text"]:
-                entities.append({
-                    "answer": current_entity["text"].strip(),
-                    "type": "named_entity",
-                    "entity_type": current_entity["type"],
-                    "confidence": current_entity["confidence"]
+        
+        # Extract key phrases
+        if self.extraction_config["extract_phrases"]:
+            phrases = self._extract_key_phrases(doc)
+            for phrase in phrases:
+                answers.append({
+                    "text": phrase["text"],
+                    "type": "phrase",
+                    "subtype": phrase["type"],
+                    "score": phrase["score"],
+                    "source": "text",
+                    "context": phrase["context"]
                 })
-            
-            return entities
-            
-        except Exception as e:
-            logger.error(f"Error extracting entities: {e}")
-            return []
+        
+        # Extract factual statements
+        if self.extraction_config["extract_facts"]:
+            facts = self._extract_facts(doc)
+            answers.extend(facts)
+        
+        return answers
     
-    def _extract_numerical_facts(self, doc) -> List[Dict[str, Any]]:
-        """Extract numerical facts and patterns."""
+    def _extract_visual_answers(self, text: str) -> List[Dict[str, Any]]:
+        """Extract answer candidates from visual content sections."""
+        answers = []
+        
+        # Extract OCR text content
+        ocr_matches = re.finditer(r"\[OCR Text:([^\]]+)\]", text)
+        for match in ocr_matches:
+            ocr_text = match.group(1).strip()
+            if len(ocr_text) >= self.extraction_config["min_answer_length"]:
+                answers.append({
+                    "text": ocr_text,
+                    "type": "visual",
+                    "subtype": "ocr_text",
+                    "score": 0.8,  # OCR confidence score
+                    "source": "image",
+                    "context": text
+                })
+        
+        # Extract image captions
+        caption_matches = re.finditer(r"\[Image Caption:([^\]]+)\]", text)
+        for match in caption_matches:
+            caption = match.group(1).strip()
+            answers.append({
+                "text": caption,
+                "type": "visual",
+                "subtype": "caption",
+                "score": 0.9,  # Caption confidence
+                "source": "image",
+                "context": text
+            })
+        
+        # Extract detected objects with high confidence
+        object_matches = re.finditer(r"\[Detected Objects:([^\]]+)\]", text)
+        for match in object_matches:
+            objects_text = match.group(1).strip()
+            objects = []
+            for obj in objects_text.split(","):
+                if "(" in obj and ")" in obj:
+                    label, conf = obj.strip().split("(")
+                    conf = float(conf.rstrip(")"))
+                    if conf > 0.7:  # Only high confidence objects
+                        objects.append(label.strip())
+            
+            if objects:
+                answers.append({
+                    "text": ", ".join(objects),
+                    "type": "visual",
+                    "subtype": "objects",
+                    "score": 0.85,
+                    "source": "image",
+                    "context": text
+                })
+        
+        # Extract scene descriptions
+        scene_matches = re.finditer(r"\[Scene Description:([^\]]+)\]", text)
+        for match in scene_matches:
+            description = match.group(1).strip()
+            answers.append({
+                "text": description,
+                "type": "visual",
+                "subtype": "scene",
+                "score": 0.9,
+                "source": "image",
+                "context": text
+            })
+        
+        # Extract visual analysis results
+        analysis_matches = re.finditer(r"\[Visual Analysis:([^\]]+)\]", text)
+        for match in analysis_matches:
+            analysis = match.group(1).strip()
+            for qa_pair in analysis.split("|"):
+                if "->" in qa_pair:
+                    q, a = qa_pair.split("->")
+                    answers.append({
+                        "text": a.strip(),
+                        "type": "visual",
+                        "subtype": "analysis",
+                        "score": 0.85,
+                        "source": "image",
+                        "context": text,
+                        "question": q.strip()
+                    })
+        
+        return answers
+    
+    def _extract_combined_answers(self, text: str) -> List[Dict[str, Any]]:
+        """Extract answers from sections containing both text and visual content."""
+        answers = []
+        
+        # First extract separate answers
+        text_answers = self._extract_text_answers(text)
+        visual_answers = self._extract_visual_answers(text)
+        
+        # Add all individual answers
+        answers.extend(text_answers)
+        answers.extend(visual_answers)
+        
+        # Look for relationships between text and visual content
+        visual_contexts = re.finditer(r"\[Visual Context:([^\]]+)\]", text)
+        for context_match in visual_contexts:
+            context = context_match.group(1).strip()
+            
+            # Find nearby text (within 3 paragraphs)
+            paragraphs = text.split("\n\n")
+            for i, para in enumerate(paragraphs):
+                if context in para:
+                    start_idx = max(0, i - 3)
+                    end_idx = min(len(paragraphs), i + 4)
+                    related_text = "\n\n".join(paragraphs[start_idx:end_idx])
+                    
+                    # Create combined answer if there's a clear relationship
+                    related_answers = [
+                        ans for ans in visual_answers
+                        if ans["context"] in related_text
+                    ]
+                    
+                    for v_ans in related_answers:
+                        combined_text = f"{v_ans['text']} (Visual) - Related to: {context}"
+                        answers.append({
+                            "text": combined_text,
+                            "type": "combined",
+                            "subtype": f"text_{v_ans['subtype']}",
+                            "score": (v_ans['score'] + 0.9) / 2,  # Average with context confidence
+                            "source": "text_and_image",
+                            "context": related_text
+                        })
+        
+        return answers
+    
+    def _extract_key_phrases(self, doc) -> List[Dict[str, Any]]:
+        """Extract key phrases from text."""
+        phrases = []
+        
+        # Extract noun phrases
+        for chunk in doc.noun_chunks:
+            if len(chunk.text.split()) >= 2:  # At least 2 words
+                phrases.append({
+                    "text": chunk.text,
+                    "type": "noun_phrase",
+                    "score": 0.8,
+                    "context": doc.text[max(0, chunk.start_char - 100):min(len(doc.text), chunk.end_char + 100)]
+                })
+        
+        # Extract verb phrases
+        for token in doc:
+            if token.pos_ == "VERB":
+                verb_phrase = ""
+                for child in token.subtree:
+                    verb_phrase += child.text + " "
+                if len(verb_phrase.split()) >= 3:  # At least 3 words
+                    phrases.append({
+                        "text": verb_phrase.strip(),
+                        "type": "verb_phrase",
+                        "score": 0.75,
+                        "context": doc.text[max(0, token.idx - 100):min(len(doc.text), token.idx + len(verb_phrase) + 100)]
+                    })
+        
+        return phrases
+    
+    def _extract_facts(self, doc) -> List[Dict[str, Any]]:
+        """Extract factual statements from text."""
         facts = []
         
         for sent in doc.sents:
-            num_tokens = [token for token in sent if token.like_num]
-            
-            if num_tokens:
-                # Find context around numbers
-                for num in num_tokens:
-                    # Look for measurement patterns
-                    if num.i + 1 < len(sent) and sent[num.i + 1].text.lower() in {
-                        "kg", "km", "meters", "years", "dollars", "percent", "%"
-                    }:
-                        facts.append({
-                            "answer": sent.text,
-                            "type": "measurement",
-                            "confidence": 0.85
-                        })
-                    
-                    # Look for date patterns
-                    elif any(date_token.ent_type_ == "DATE" for date_token in sent):
-                        facts.append({
-                            "answer": sent.text,
-                            "type": "date_fact",
-                            "confidence": 0.85
-                        })
-                    
-                    # Look for statistical statements
-                    elif any(token.text.lower() in {
-                        "average", "mean", "median", "total", "approximately",
-                        "about", "roughly", "estimated"
-                    } for token in sent):
-                        facts.append({
-                            "answer": sent.text,
-                            "type": "statistic",
-                            "confidence": 0.8
-                        })
+            # Look for factual indicators
+            if any(token.dep_ in {"ROOT", "nsubj"} for token in sent):
+                fact_score = self._calculate_fact_score(sent)
+                if fact_score >= self.extraction_config["min_fact_score"]:
+                    facts.append({
+                        "text": sent.text,
+                        "type": "fact",
+                        "subtype": "statement",
+                        "score": fact_score,
+                        "source": "text",
+                        "context": doc.text[max(0, sent.start_char - 100):min(len(doc.text), sent.end_char + 100)]
+                    })
         
         return facts
     
-    def _extract_visual_references(self, text: str) -> List[Dict[str, Any]]:
-        """Extract references to visual elements in text."""
-        visual_patterns = []
+    def _calculate_fact_score(self, sent) -> float:
+        """Calculate confidence score for a potential fact."""
+        score = 0.5  # Base score
         
-        # Pattern for visual references
-        patterns = [
-            (r"(?:In |The |This )(?:figure|image|picture|illustration|photo|graph|chart|diagram)[^.]*\.", "visual_reference"),
-            (r"(?:shows|displays|depicts|represents|visualizes)[^.]*\.", "visual_description"),
-            (r"(?:as shown|as illustrated|as depicted|as demonstrated)[^.]*\.", "visual_reference"),
-            (r"(?:can be seen|is visible|appears|looking at)[^.]*\.", "visual_observation")
-        ]
+        # Increase score based on indicators
+        if any(token.pos_ == "NUM" for token in sent):
+            score += 0.1  # Contains numbers
+        if any(token.ent_type_ in {"DATE", "TIME", "PERCENT", "MONEY"} for token in sent):
+            score += 0.1  # Contains specific entities
+        if any(token.dep_ in {"nsubj", "dobj"} for token in sent):
+            score += 0.1  # Has clear subject-object structure
+        if any(token.pos_ == "VERB" and token.tag_ in {"VBD", "VBZ"} for token in sent):
+            score += 0.1  # Uses definitive verb tenses
         
-        for pattern, ref_type in patterns:
-            matches = re.finditer(pattern, text, re.IGNORECASE)
-            for match in matches:
-                visual_patterns.append({
-                    "answer": match.group(0),
-                    "type": ref_type,
-                    "confidence": 0.85
-                })
-        
-        return visual_patterns
+        return min(1.0, score)
     
-    def _extract_slide_content(self, text: str) -> List[Dict[str, Any]]:
-        """Extract content from presentation slides."""
-        slide_content = []
+    def _filter_answers(self, answers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Filter answer candidates based on quality criteria."""
+        filtered = []
         
-        # Extract bullet points
-        bullet_points = re.findall(r'(?:^|\n)[•\-\*]\s*([^\n]+)', text)
-        for point in bullet_points:
-            if len(point.split()) >= 3:  # Minimum length for meaningful content
-                slide_content.append({
-                    "answer": point,
-                    "type": "bullet_point",
-                    "confidence": 0.9
-                })
+        for answer in answers:
+            # Check minimum length
+            if len(answer["text"].split()) < self.extraction_config["min_answer_length"]:
+                continue
+                
+            # Check maximum length
+            if len(answer["text"].split()) > self.extraction_config["max_answer_length"]:
+                continue
+            
+            # Check minimum score
+            if answer["score"] < self.extraction_config["min_answer_score"]:
+                continue
+            
+            # Remove duplicates using semantic similarity
+            if not self._is_duplicate(answer, filtered):
+                filtered.append(answer)
         
-        # Extract title-like statements
-        title_patterns = re.findall(r'(?:^|\n)([A-Z][^.!?\n]{15,100}[.!?])', text)
-        for title in title_patterns:
-            slide_content.append({
-                "answer": title,
-                "type": "slide_title",
-                "confidence": 0.85
-            })
-        
-        return slide_content
+        return filtered
     
-    def _extract_image_references(self, text: str) -> List[Dict[str, Any]]:
-        """Extract references to embedded images."""
-        references = []
-        
-        # Find sentences referring to embedded images
-        doc = self.nlp(text)
-        for sent in doc.sents:
-            lower_sent = sent.text.lower()
+    def _rank_answers(self, answers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Rank answers by relevance and quality."""
+        if not answers:
+            return []
             
-            # Check for image references
-            if any(term in lower_sent for term in [
-                "image", "figure", "photo", "picture", "illustration",
-                "shown", "depicted", "illustrated"
-            ]):
-                references.append({
-                    "answer": sent.text,
-                    "type": "image_reference",
-                    "confidence": 0.8
-                })
+        # Calculate ranking scores
+        for answer in answers:
+            ranking_score = answer["score"]  # Start with confidence score
+            
+            # Adjust based on answer type
+            type_weights = {
+                "combined": 1.2,    # Prefer combined text-visual answers
+                "fact": 1.1,       # Prefer factual statements
+                "visual": 1.0,     # Standard weight for visual content
+                "entity": 0.9,     # Slightly lower weight for single entities
+                "phrase": 0.8      # Lower weight for general phrases
+            }
+            ranking_score *= type_weights.get(answer["type"], 1.0)
+            
+            # Adjust based on length (prefer medium-length answers)
+            length = len(answer["text"].split())
+            if 5 <= length <= 15:
+                ranking_score *= 1.1
+            
+            answer["ranking_score"] = ranking_score
         
-        return references
+        # Sort by ranking score
+        return sorted(answers, key=lambda x: x["ranking_score"], reverse=True)
     
-    def _get_context(self, text: str, answer: str, window: int) -> str:
-        """Get surrounding context for an answer."""
-        try:
-            # Find the answer position
-            answer_pos = text.lower().find(answer.lower())
-            if answer_pos == -1:
-                return answer
+    def _is_duplicate(self, candidate: Dict[str, Any], existing: List[Dict[str, Any]]) -> bool:
+        """Check if an answer is semantically similar to existing answers."""
+        if not existing:
+            return False
             
-            # Get context window
-            start = max(0, answer_pos - window)
-            end = min(len(text), answer_pos + len(answer) + window)
+        candidate_embedding = self.sim_model.encode([candidate["text"]])[0]
+        
+        for answer in existing:
+            existing_embedding = self.sim_model.encode([answer["text"]])[0]
+            similarity = cosine_similarity(
+                candidate_embedding.reshape(1, -1),
+                existing_embedding.reshape(1, -1)
+            )[0][0]
             
-            # Expand to sentence boundaries
-            while start > 0 and text[start] not in ".!?\n":
-                start -= 1
-            while end < len(text) and text[end] not in ".!?\n":
-                end += 1
-            
-            return text[start:end].strip()
-            
-        except Exception as e:
-            logger.error(f"Error getting context: {e}")
-            return answer
+            if similarity > self.extraction_config["duplicate_threshold"]:
+                return True
+        
+        return False

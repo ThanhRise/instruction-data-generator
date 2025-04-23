@@ -124,15 +124,11 @@ class InstructionDataGenerator:
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
             
-            # Load and process input data
+            # Load input data - now returns unified documents
             input_data = self.data_loader.load_data(input_dir)
             
-            # Process text and image data separately
-            text_qa_pairs = self._process_text_data(input_data["text"])
-            image_qa_pairs = self._process_image_data(input_data["images"])
-            
-            # Combine and filter all QA pairs
-            all_qa_pairs = text_qa_pairs + image_qa_pairs
+            # Process all documents with unified content
+            qa_pairs = self._process_unified_content(input_data["documents"])
             
             # Log model performance
             if self.current_model:
@@ -140,8 +136,8 @@ class InstructionDataGenerator:
                     model_name=self.current_model,
                     task_type="instruction_generation",
                     duration=0.0,  # Will be updated by decorator
-                    input_tokens=sum(estimate_tokens(str(data)) for data in input_data.values()),
-                    output_tokens=sum(estimate_tokens(str(pair)) for pair in all_qa_pairs),
+                    input_tokens=sum(estimate_tokens(doc["content"]) for doc in input_data["documents"]),
+                    output_tokens=sum(estimate_tokens(str(pair)) for pair in qa_pairs),
                     success=True
                 )
                 # Log GPU stats if available
@@ -149,19 +145,19 @@ class InstructionDataGenerator:
             
             # Save intermediate results if configured
             if self.config["agent"]["output"]["save_intermediate"]:
-                self._save_intermediate_results(all_qa_pairs, output_path)
+                self._save_intermediate_results(qa_pairs, output_path)
             
             # Save final instruction data
-            self._save_instruction_data(all_qa_pairs, output_path)
+            self._save_instruction_data(qa_pairs, output_path)
             
-            logger.info(f"Generated {len(all_qa_pairs)} instruction pairs")
+            logger.info(f"Generated {len(qa_pairs)} instruction pairs")
             
         except Exception as e:
             if self.current_model:
                 self.metrics_logger.log_model_usage(
                     model_name=self.current_model,
                     task_type="instruction_generation",
-                    duration=0.0,  # Will be updated by decorator
+                    duration=0.0,
                     input_tokens=0,
                     output_tokens=0,
                     success=False,
@@ -169,7 +165,7 @@ class InstructionDataGenerator:
                 )
             logger.error(f"Error generating instruction data: {e}")
             raise
-    
+
     def _load_config(self, *config_paths: Union[str, Path], env_file: Optional[Path] = None) -> Dict[str, Any]:
         """Load and merge configuration from YAML files and environment variables."""
         try:
@@ -178,19 +174,19 @@ class InstructionDataGenerator:
             logger.error(f"Error loading configuration: {e}")
             raise
     
-    def _process_text_data(self, text_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Process text data to generate QA pairs."""
+    def _process_unified_content(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Process unified document content to generate QA pairs."""
         qa_pairs = []
         contexts = {}
         
         try:
-            # Extract answers from text
-            for item in text_data:
-                source = item["source"]
-                content = item["content"]
+            # Extract answers from unified content
+            for doc in documents:
+                source = doc["source"]
+                content = doc["content"]
                 contexts[source] = content
                 
-                # Extract potential answers
+                # Extract potential answers from unified content
                 extracted_answers = self.answer_extractor.extract_answers(content)
                 
                 # Generate questions for extracted answers
@@ -223,45 +219,7 @@ class InstructionDataGenerator:
             return validated_pairs
             
         except Exception as e:
-            logger.error(f"Error processing text data: {e}")
-            return []
-    
-    def _process_image_data(self, image_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Process image data to generate QA pairs."""
-        qa_pairs = []
-        
-        try:
-            # Generate annotations for images
-            annotated_data = self.image_annotator.annotate_images(
-                image_data,
-                Path(self.config["agent"]["output"]["save_intermediate"])
-            )
-            
-            # Generate QA pairs from annotations
-            for item in annotated_data:
-                source = item["source"]
-                annotation = item["annotation"]
-                
-                # Extract answers from annotation
-                extracted_answers = self.answer_extractor.extract_answers(annotation)
-                
-                # Generate questions
-                image_pairs = self.question_generator.generate_questions({
-                    "source": source,
-                    "content": annotation,
-                    "extracted_answers": extracted_answers
-                })
-                
-                qa_pairs.extend(image_pairs)
-            
-            # Filter pairs
-            contexts = {item["source"]: item["annotation"] for item in annotated_data}
-            filtered_pairs = self.quality_filter.filter_qa_pairs(qa_pairs, contexts)
-            
-            return filtered_pairs
-            
-        except Exception as e:
-            logger.error(f"Error processing image data: {e}")
+            logger.error(f"Error processing unified content: {e}")
             return []
     
     def _save_intermediate_results(self, qa_pairs: List[Dict[str, Any]], output_dir: Path) -> None:

@@ -1,199 +1,242 @@
 from typing import Dict, List, Any
 import logging
-from .metrics import QualityMetrics
-import numpy as np
-from collections import defaultdict
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+import re
 
 logger = logging.getLogger(__name__)
 
 class QualityFilter:
-    """Filters and validates generated instruction data based on quality metrics."""
+    """Filters and validates generated instruction data."""
     
     def __init__(self, config: Dict[str, Any]):
-        """
-        Initialize the quality filter.
-        
-        Args:
-            config: Configuration dictionary containing quality thresholds
-        """
+        """Initialize quality filter with configuration."""
         self.config = config
-        self.metrics = QualityMetrics()
-        self.min_quality_score = config["agent"]["quality_control"]["min_quality_score"]
+        self.quality_config = config["agent"]["quality_control"]
         
-    def filter_qa_pairs(self, qa_pairs: List[Dict[str, Any]], contexts: Dict[str, str]) -> List[Dict[str, Any]]:
-        """
-        Filter QA pairs based on quality metrics.
+        # Load quality metrics
+        self.metrics = self._load_metrics()
         
-        Args:
-            qa_pairs: List of question-answer pairs to filter
-            contexts: Dictionary mapping source to original context
-            
-        Returns:
-            List of filtered QA pairs that meet quality standards
-        """
+        # Initialize sentence transformer for semantic similarity
+        self.sim_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+    
+    def filter_qa_pairs(
+        self,
+        qa_pairs: List[Dict[str, Any]],
+        contexts: Dict[str, str]
+    ) -> List[Dict[str, Any]]:
+        """Filter QA pairs based on quality criteria."""
         filtered_pairs = []
-        metrics_by_source = defaultdict(list)
         
-        # Compute metrics for each QA pair
-        for qa_pair in qa_pairs:
-            try:
-                source = qa_pair["source"]
-                context = contexts.get(source, "")
-                
-                if not context:
-                    logger.warning(f"No context found for source: {source}")
-                    continue
-                
-                # Compute quality metrics
-                metrics = self.metrics.compute_metrics(qa_pair, context)
-                qa_pair["metrics"] = metrics
-                metrics_by_source[source].append(qa_pair)
-                
-            except Exception as e:
-                logger.error(f"Error computing metrics for QA pair: {e}")
-                continue
-        
-        # Filter and select best pairs for each source
-        for source, source_pairs in metrics_by_source.items():
-            try:
-                # Evaluate diversity within source
-                diversity_metrics = self.metrics.evaluate_diversity(source_pairs)
-                
-                # Sort pairs by quality score
-                sorted_pairs = sorted(
-                    source_pairs,
-                    key=lambda x: x["metrics"]["overall_quality"],
-                    reverse=True
-                )
-                
-                # Filter based on minimum quality score
-                quality_pairs = [
-                    pair for pair in sorted_pairs
-                    if pair["metrics"]["overall_quality"] >= self.min_quality_score
-                ]
-                
-                # Select diverse subset
-                selected_pairs = self._select_diverse_subset(quality_pairs)
-                filtered_pairs.extend(selected_pairs)
-                
-            except Exception as e:
-                logger.error(f"Error filtering pairs for source {source}: {e}")
-                continue
+        for pair in qa_pairs:
+            if self._meets_quality_criteria(pair, contexts[pair["source"]]):
+                filtered_pairs.append(pair)
         
         return filtered_pairs
     
-    def _select_diverse_subset(self, qa_pairs: List[Dict[str, Any]], max_pairs: int = None) -> List[Dict[str, Any]]:
-        """
-        Select a diverse subset of QA pairs using greedy selection.
-        
-        Args:
-            qa_pairs: List of QA pairs to select from
-            max_pairs: Maximum number of pairs to select (optional)
-            
-        Returns:
-            List of selected diverse QA pairs
-        """
-        if not qa_pairs:
-            return []
-            
-        if max_pairs is None:
-            max_pairs = len(qa_pairs)
-        
-        selected = [qa_pairs[0]]  # Start with highest quality pair
-        remaining = qa_pairs[1:]
-        
-        while len(selected) < max_pairs and remaining:
-            # Find pair with maximum diversity from selected pairs
-            max_diversity = -1
-            best_pair_idx = -1
-            
-            for i, pair in enumerate(remaining):
-                # Calculate average diversity with selected pairs
-                diversity = self._compute_pair_diversity(pair, selected)
-                
-                if diversity > max_diversity:
-                    max_diversity = diversity
-                    best_pair_idx = i
-            
-            if best_pair_idx >= 0:
-                selected.append(remaining.pop(best_pair_idx))
-            else:
-                break
-        
-        return selected
-    
-    def _compute_pair_diversity(self, pair: Dict[str, Any], selected_pairs: List[Dict[str, Any]]) -> float:
-        """
-        Compute diversity score between a pair and already selected pairs.
-        
-        Args:
-            pair: QA pair to evaluate
-            selected_pairs: List of already selected pairs
-            
-        Returns:
-            Average diversity score
-        """
-        diversities = []
-        
-        for selected in selected_pairs:
-            # Compare questions
-            question_diversity = self.metrics._compute_diversity_score(
-                [pair["question"], selected["question"]]
-            )
-            
-            # Compare answers
-            answer_diversity = self.metrics._compute_diversity_score(
-                [pair["answer"], selected["answer"]]
-            )
-            
-            # Combine scores
-            pair_diversity = (question_diversity + answer_diversity) / 2
-            diversities.append(pair_diversity)
-        
-        return np.mean(diversities) if diversities else 0.0
-    
-    def validate_against_source(self, qa_pairs: List[Dict[str, Any]], contexts: Dict[str, str]) -> List[Dict[str, Any]]:
-        """
-        Validate that answers can be derived from source context.
-        
-        Args:
-            qa_pairs: List of QA pairs to validate
-            contexts: Dictionary mapping source to original context
-            
-        Returns:
-            List of validated QA pairs
-        """
+    def validate_against_source(
+        self,
+        qa_pairs: List[Dict[str, Any]],
+        contexts: Dict[str, str]
+    ) -> List[Dict[str, Any]]:
+        """Validate QA pairs against source content."""
         validated_pairs = []
         
-        for qa_pair in qa_pairs:
-            try:
-                source = qa_pair["source"]
-                context = contexts.get(source, "")
-                
-                if not context:
-                    continue
-                
-                # Check if answer is contained in context (basic validation)
-                answer = qa_pair["answer"].lower()
-                context_lower = context.lower()
-                
-                # Compute relevance and similarity metrics
-                metrics = qa_pair.get("metrics", {})
-                relevance = metrics.get("relevance", 0.0)
-                rouge_l = metrics.get("rougeL", 0.0)
-                
-                # Validate based on multiple criteria
-                is_valid = (
-                    relevance >= 0.5 and  # High relevance to context
-                    rouge_l >= 0.3 and    # Significant overlap with context
-                    len(answer.split()) >= 3  # Minimum answer length
-                )
-                
-                if is_valid:
-                    validated_pairs.append(qa_pair)
-                    
-            except Exception as e:
-                logger.error(f"Error validating QA pair: {e}")
-                continue
+        for pair in qa_pairs:
+            source_content = contexts[pair["source"]]
+            
+            # Extract all text content including image-derived text
+            text_content = self._extract_all_text(source_content)
+            
+            # Check if answer is supported by source content
+            if self._validate_answer(pair["answer"], text_content):
+                # Check for answer presence in different content types
+                answer_locations = self._locate_answer(pair["answer"], source_content)
+                pair["metadata"] = {
+                    **pair.get("metadata", {}),
+                    "answer_locations": answer_locations
+                }
+                validated_pairs.append(pair)
         
         return validated_pairs
+    
+    def _extract_all_text(self, content: str) -> str:
+        """Extract all text content including OCR and image captions."""
+        # Split content into sections
+        sections = content.split("\n\n")
+        extracted_text = []
+        
+        for section in sections:
+            # Keep original text
+            if not (section.startswith("[OCR Text:") or section.startswith("[Image Caption:")):
+                extracted_text.append(section)
+            # Extract OCR text
+            ocr_match = re.search(r"\[OCR Text: (.*?)\]", section)
+            if ocr_match:
+                extracted_text.append(ocr_match.group(1))
+            # Extract image captions
+            caption_match = re.search(r"\[Image Caption: (.*?)\]", section)
+            if caption_match:
+                extracted_text.append(caption_match.group(1))
+        
+        return "\n\n".join(extracted_text)
+    
+    def _locate_answer(self, answer: str, content: str) -> Dict[str, bool]:
+        """Locate where the answer appears in different content types."""
+        locations = {
+            "main_text": False,
+            "ocr_text": False,
+            "image_caption": False
+        }
+        
+        # Check main text (excluding OCR and captions)
+        main_text = "\n\n".join(
+            section for section in content.split("\n\n")
+            if not (section.startswith("[OCR Text:") or section.startswith("[Image Caption:"))
+        )
+        locations["main_text"] = self._text_similar(answer, main_text)
+        
+        # Check OCR text
+        ocr_sections = [
+            re.search(r"\[OCR Text: (.*?)\]", section).group(1)
+            for section in content.split("\n\n")
+            if section.startswith("[OCR Text:")
+        ]
+        if ocr_sections:
+            locations["ocr_text"] = any(
+                self._text_similar(answer, ocr_text)
+                for ocr_text in ocr_sections
+            )
+        
+        # Check image captions
+        caption_sections = [
+            re.search(r"\[Image Caption: (.*?)\]", section).group(1)
+            for section in content.split("\n\n")
+            if section.startswith("[Image Caption:")
+        ]
+        if caption_sections:
+            locations["image_caption"] = any(
+                self._text_similar(answer, caption)
+                for caption in caption_sections
+            )
+        
+        return locations
+    
+    def _meets_quality_criteria(
+        self,
+        pair: Dict[str, Any],
+        context: str
+    ) -> bool:
+        """Check if QA pair meets quality criteria."""
+        # Get thresholds from config
+        thresholds = self.quality_config["thresholds"]
+        
+        # Basic length checks
+        if not self._check_length_requirements(pair):
+            return False
+        
+        # Check answer presence in context
+        if not self._validate_answer(pair["answer"], context):
+            return False
+        
+        # Check relevance score
+        if not self._check_relevance(pair["question"], pair["answer"], context):
+            return False
+        
+        # Apply content filters
+        if not self._apply_content_filters(pair):
+            return False
+        
+        return True
+    
+    def _check_length_requirements(self, pair: Dict[str, Any]) -> bool:
+        """Check if QA pair meets length requirements."""
+        gen_config = self.config["agent"]["instruction_generation"]
+        
+        question_len = len(pair["question"].split())
+        answer_len = len(pair["answer"].split())
+        
+        return (
+            gen_config["min_question_length"] <= question_len <= gen_config["max_question_length"]
+            and gen_config["min_answer_length"] <= answer_len <= gen_config["max_answer_length"]
+        )
+    
+    def _validate_answer(self, answer: str, context: str) -> bool:
+        """Validate if answer is supported by context."""
+        # Use sentence embeddings to check semantic similarity
+        context_embedding = self.sim_model.encode([context])
+        answer_embedding = self.sim_model.encode([answer])
+        
+        similarity = cosine_similarity(context_embedding, answer_embedding)[0][0]
+        return similarity >= self.quality_config["thresholds"]["answer_presence"]
+    
+    def _check_relevance(
+        self,
+        question: str,
+        answer: str,
+        context: str
+    ) -> bool:
+        """Check relevance of QA pair to context."""
+        # Encode texts
+        encodings = self.sim_model.encode([question, answer, context])
+        
+        # Calculate similarities
+        q_c_sim = cosine_similarity([encodings[0]], [encodings[2]])[0][0]
+        a_c_sim = cosine_similarity([encodings[1]], [encodings[2]])[0][0]
+        
+        # Get threshold
+        threshold = self.quality_config["thresholds"]["relevance"]
+        
+        return q_c_sim >= threshold and a_c_sim >= threshold
+    
+    def _apply_content_filters(self, pair: Dict[str, Any]) -> bool:
+        """Apply content filters to QA pair."""
+        filters = self.quality_config["content_filters"]
+        
+        for filter_type in filters:
+            if not self._check_filter(filter_type, pair):
+                return False
+        
+        return True
+    
+    def _check_filter(
+        self,
+        filter_type: str,
+        pair: Dict[str, Any]
+    ) -> bool:
+        """Check specific content filter."""
+        text = f"{pair['question']} {pair['answer']}"
+        
+        if filter_type == "profanity":
+            return not self._contains_profanity(text)
+        elif filter_type == "personal_info":
+            return not self._contains_personal_info(text)
+        elif filter_type == "code_snippets":
+            return not self._contains_code(text)
+        
+        return True
+    
+    def _text_similar(self, text1: str, text2: str) -> bool:
+        """Check if two texts are semantically similar."""
+        if not text1 or not text2:
+            return False
+            
+        # Use sentence embeddings for similarity
+        embeddings = self.sim_model.encode([text1, text2])
+        similarity = cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
+        
+        return similarity >= self.quality_config["thresholds"]["relevance"]
+    
+    def _load_metrics(self) -> Dict[str, Any]:
+        """Load quality metrics from configuration."""
+        metrics = {}
+        
+        for metric in self.quality_config["metrics"]:
+            if metric == "rouge":
+                from rouge_score import rouge_scorer
+                metrics["rouge"] = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+            elif metric == "bert_score":
+                from bert_score import BERTScorer
+                metrics["bert_score"] = BERTScorer(lang="en", rescale_with_baseline=True)
+        
+        return metrics

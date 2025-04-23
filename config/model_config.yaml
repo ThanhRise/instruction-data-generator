@@ -168,3 +168,90 @@ prompts:
       Focus area: {focus}
       Document section: {section}
       Generate a question that:
+
+agent:
+  document_processing:
+    image_processing:
+      # Core image processing settings
+      use_object_detection: true
+      use_image_captioning: true
+      use_visual_qa: true
+      use_scene_understanding: true
+      use_ocr: true
+      
+      # Model configurations
+      object_detection_model: "microsoft/faster-rcnn-resnet50-fpn"
+      caption_model: "Salesforce/blip2-opt-2.7b"
+      vqa_model: "dandelin/vilt-b32-finetuned-vqa"
+      scene_model: "microsoft/git-large-coco"
+      
+      # OCR settings
+      ocr_language: "eng"
+      psm: 3  # Page segmentation mode
+      oem: 3  # OCR Engine mode
+      
+      # Detection settings
+      detection_threshold: 0.5
+      max_objects: 20
+      
+      # Processing options
+      enable_gpu: true
+      batch_size: 4
+      image_size: 512
+      
+    ocr_config:
+      language: "eng"
+      psm: 3
+      oem: 3
+    
+    text_settings:
+      clean_whitespace: true
+      remove_urls: true
+      min_chars: 10
+      max_chars: 100000
+      table_format: "markdown"
+    
+    pdf_settings:
+      extract_images: true
+      use_ocr_fallback: true
+      dpi: 300
+      
+  instruction_generation:
+    answer_extraction:
+      extract_entities: true
+      extract_phrases: true
+      extract_facts: true
+      entity_types: ["PERSON", "ORG", "GPE", "LOC", "DATE", "EVENT", "WORK_OF_ART"]
+      min_answer_length: 3
+      max_answer_length: 100
+      min_fact_score: 0.6
+      max_answers: 50
+      spacy_model: "en_core_web_sm"
+      duplicate_threshold: 0.85
+      
+    question_generation:
+      use_question_classifier: true
+      min_question_length: 5
+      max_question_length: 30
+      min_answer_length: 3
+      max_answer_length: 200
+      min_qa_score: 0.6
+      max_questions: 30
+      duplicate_threshold: 0.85
+      spacy_model: "en_core_web_sm"
+      
+      custom_templates:
+        visual:
+          layout:
+            - "How is the content laid out in this image?"
+            - "What is the visual structure or arrangement?"
+          style:
+            - "What is the visual style or design of this image?"
+            - "What artistic or design elements are notable?"
+        combined:
+          text_layout:
+            - "How does the layout support {context}?"
+            - "How is {context} enhanced by the visual arrangement?"
+          text_style:
+            - "How does the visual style relate to {context}?"
+            - "What design choices reinforce {context}?"

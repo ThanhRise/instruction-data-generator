@@ -91,11 +91,12 @@ agent:
   document_processing:
     extract_images: true
     ocr_enabled: true
+    use_image_captioning: true
     ocr_config:
       language: "eng"
       psm: 3  # Page segmentation mode
       oem: 3  # OCR Engine mode
-    
+    image_caption_model: "Salesforce/blip2-flan-t5-xl"
     pdf_settings:
       extract_images: true
       use_ocr_fallback: true
@@ -134,6 +135,18 @@ agent:
       - embedded_images
     chunk_size: 512
     chunk_overlap: 50
+
+  # Image processing settings
+  image_processing:
+    use_ocr: true
+    use_captioning: true
+    ocr_config:
+      language: "eng"
+      psm: 3
+      oem: 3
+    caption_model: "Salesforce/blip2-flan-t5-xl"
+    batch_size: 16
+    max_image_size: [1024, 1024]
 
   # Model settings
   model:
