@@ -6,7 +6,6 @@ import numpy as np
 from transformers import (
     AutoImageProcessor,
     AutoModelForObjectDetection,
-    AutoModelForImageToText,
     AutoModelForQuestionAnswering,
     AutoTokenizer,
     pipeline

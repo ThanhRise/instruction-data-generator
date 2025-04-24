@@ -29,7 +29,6 @@ def setup_vllm_model(model_config: dict, model_name: str = "llama2_70b") -> LLM:
         tensor_parallel_size=serving_config["tensor_parallel_size"],
         gpu_memory_utilization=serving_config["gpu_memory_utilization"],
         max_num_batched_tokens=serving_config["max_num_batched_tokens"],
-        max_num_seqs=serving_config["max_num_seqs"],
         trust_remote_code=serving_config["trust_remote_code"],
         dtype=serving_config["dtype"],
         quantization_config={
@@ -38,7 +37,7 @@ def setup_vllm_model(model_config: dict, model_name: str = "llama2_70b") -> LLM:
                 "bits": serving_config["quantization"]["bits"],
                 "group_size": serving_config["quantization"]["group_size"]
             }
-        }
+        } if serving_config["quantization"]["enabled"] else None,
     )
     return llm
 

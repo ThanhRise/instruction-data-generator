@@ -244,12 +244,37 @@ def merge_configs(*config_files: Union[str, Path], env_file: Optional[Union[str,
         raise ImportError("PyYAML is required for config file handling")
     
     merged = {}
+    config_sources = {}  # Track which file each config key came from
     
     # Load and merge YAML configs
     for config_file in config_files:
         try:
             config = load_yaml_config(config_file)
-            merged.update(config)
+            
+            # Track conflicting keys
+            for key in config:
+                if key in merged:
+                    # Check for potential conflicts
+                    if isinstance(merged[key], dict) and isinstance(config[key], dict):
+                        # Detect structural conflicts in nested dictionaries
+                        conflicts = _detect_structural_conflicts(
+                            merged[key], 
+                            config[key], 
+                            key,
+                            config_sources[key],
+                            str(config_file)
+                        )
+                        if conflicts:
+                            raise ValueError(
+                                f"Configuration conflict detected:\n" + "\n".join(conflicts)
+                            )
+                    config_sources[key] = f"{config_sources[key]}, {config_file}"
+                else:
+                    config_sources[key] = str(config_file)
+            
+            # Perform deep merge
+            merged = _deep_merge_configs(merged, config)
+            
         except Exception as e:
             logger.error(f"Error merging config from {config_file}: {e}")
             raise
@@ -279,9 +304,88 @@ def merge_configs(*config_files: Union[str, Path], env_file: Optional[Union[str,
             
     return merged
 
+def _detect_structural_conflicts(
+    dict1: Dict[str, Any],
+    dict2: Dict[str, Any],
+    path: str,
+    source1: str,
+    source2: str
+) -> List[str]:
+    """
+    Detect structural conflicts between two dictionaries.
+    
+    Args:
+        dict1: First dictionary
+        dict2: Second dictionary
+        path: Current path in the config hierarchy
+        source1: Source file of first dictionary
+        source2: Source file of second dictionary
+        
+    Returns:
+        List of conflict messages, empty if no conflicts
+    """
+    conflicts = []
+    
+    for key in set(dict1.keys()) | set(dict2.keys()):
+        current_path = f"{path}.{key}"
+        
+        # Check if key exists in both dictionaries
+        if key in dict1 and key in dict2:
+            val1, val2 = dict1[key], dict2[key]
+            
+            # Check for type mismatches
+            if type(val1) != type(val2):
+                conflicts.append(
+                    f"Type mismatch at {current_path}:\n"
+                    f"  {source1}: {type(val1).__name__}\n"
+                    f"  {source2}: {type(val2).__name__}"
+                )
+            
+            # Recursively check nested dictionaries
+            elif isinstance(val1, dict) and isinstance(val2, dict):
+                nested_conflicts = _detect_structural_conflicts(
+                    val1, val2, current_path, source1, source2
+                )
+                conflicts.extend(nested_conflicts)
+                
+            # Check for value conflicts in non-dictionary types
+            elif val1 != val2:
+                conflicts.append(
+                    f"Value conflict at {current_path}:\n"
+                    f"  {source1}: {val1}\n"
+                    f"  {source2}: {val2}"
+                )
+    
+    return conflicts
+
+def _deep_merge_configs(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Perform a deep merge of two configuration dictionaries.
+    
+    Args:
+        base: Base configuration dictionary
+        override: Override configuration dictionary
+        
+    Returns:
+        Merged configuration dictionary
+    """
+    merged = base.copy()
+    
+    for key, value in override.items():
+        if (
+            key in merged 
+            and isinstance(merged[key], dict) 
+            and isinstance(value, dict)
+        ):
+            merged[key] = _deep_merge_configs(merged[key], value)
+        else:
+            merged[key] = value
+            
+    return merged
+
 def validate_config(config: Dict[str, Any], required_keys: List[str]) -> bool:
     """
-    Validate configuration has required keys.
+    Validate configuration has required keys and correct structure.
     
     Args:
         config: Configuration dictionary
@@ -290,6 +394,7 @@ def validate_config(config: Dict[str, Any], required_keys: List[str]) -> bool:
     Returns:
         True if valid, False otherwise
     """
+    # Check required keys
     missing = []
     for key in required_keys:
         if key not in config:
@@ -297,6 +402,71 @@ def validate_config(config: Dict[str, Any], required_keys: List[str]) -> bool:
             
     if missing:
         logger.error(f"Missing required configuration keys: {missing}")
+        return False
+    
+    # Validate specific sections if they exist
+    if "agent" in config:
+        if not _validate_agent_config(config["agent"]):
+            return False
+            
+    if "models" in config:
+        if not _validate_model_config(config["models"]):
+            return False
+    
+    return True
+
+def _validate_agent_config(agent_config: Dict[str, Any]) -> bool:
+    """
+    Validate agent configuration section.
+    
+    Args:
+        agent_config: Agent configuration dictionary
+        
+    Returns:
+        True if valid, False otherwise
+    """
+    required_sections = [
+        "input_processing",
+        "instruction_generation",
+        "quality_control",
+        "document_processing"
+    ]
+    
+    missing = []
+    for section in required_sections:
+        if section not in agent_config:
+            missing.append(section)
+            
+    if missing:
+        logger.error(f"Missing required agent config sections: {missing}")
+        return False
+        
+    return True
+
+def _validate_model_config(model_config: Dict[str, Any]) -> bool:
+    """
+    Validate model configuration section.
+    
+    Args:
+        model_config: Model configuration dictionary
+        
+    Returns:
+        True if valid, False otherwise
+    """
+    required_sections = [
+        "llm_models",
+        "serving",
+        "document_understanding",
+        "image_processing"
+    ]
+    
+    missing = []
+    for section in required_sections:
+        if section not in model_config:
+            missing.append(section)
+            
+    if missing:
+        logger.error(f"Missing required model config sections: {missing}")
         return False
         
     return True

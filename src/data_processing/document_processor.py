@@ -15,6 +15,7 @@ from pdf2image import convert_from_path
 import cv2
 import numpy as np
 import io
+from .image_annotator import ImageAnnotator  # Add this import
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,9 @@ class DocumentProcessor:
         """
         self.config = config
         self.doc_config = config["agent"]["document_processing"]
+        
+        # Initialize ImageAnnotator
+        self.image_annotator = ImageAnnotator(config)
         
         # Configure OCR and image captioning
         self._configure_ocr()

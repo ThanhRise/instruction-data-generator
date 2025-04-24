@@ -58,13 +58,27 @@ class InstructionDataGenerator:
         # Validate configuration
         required_config_sections = [
             "models",
-            "agent",
-            "data_processing",
-            "instruction_generation",
-            "quality_control"
+            "agent"
         ]
         if not validate_config(self.config, required_config_sections):
-            raise ValueError("Invalid configuration")
+            raise ValueError("Invalid configuration: Missing top-level sections")
+            
+        # Additional validation of required agent subsections
+        required_agent_sections = [
+            "input_processing",
+            "data_processing",
+            "instruction_generation",
+            "quality_control",
+            "document_processing"
+        ]
+        missing_agent_sections = [
+            section for section in required_agent_sections 
+            if section not in self.config["agent"]
+        ]
+        if missing_agent_sections:
+            raise ValueError(
+                f"Invalid agent configuration: Missing sections: {', '.join(missing_agent_sections)}"
+            )
         
         # Set up logging
         setup_logging(log_dir or "logs")
