@@ -13,7 +13,7 @@ models:
     llama2_70b:
       name: "meta-llama/Llama-2-70b-chat-hf"
       type: "vllm"
-      model_path: "models/llama2-70b"
+      model_path: "meta-llama/Llama-2-70b-chat-hf"
       parameters:
         temperature: 0.8
         top_p: 0.95
@@ -49,9 +49,9 @@ models:
   # Model serving configuration
   serving:
     vllm:
-      tensor_parallel_size: 4
+      tensor_parallel_size: 2
       gpu_memory_utilization: 0.9
-      max_num_batched_tokens: 8192
+      max_num_batched_tokens: 4096
       trust_remote_code: true
       dtype: "float16"
       quantization:

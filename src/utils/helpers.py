@@ -184,12 +184,12 @@ def chunk_text(text: str, max_length: int = 512, overlap: int = 50) -> List[str]
         
     return chunks
 
-def load_env_config(env_path: Union[str, Path]) -> Dict[str, Any]:
+def load_env_config(env_path: Union[str, Path] = "config/.env") -> Dict[str, Any]:
     """
     Load configuration from environment file.
     
     Args:
-        env_path: Path to environment file
+        env_path: Path to environment file, defaults to config/.env
         
     Returns:
         Dictionary containing environment configuration
@@ -198,6 +198,16 @@ def load_env_config(env_path: Union[str, Path]) -> Dict[str, Any]:
         from dotenv import load_dotenv
         import os
         
+        # Handle default config path relative to project root
+        if env_path == "config/.env":
+            # Try to find project root by looking for main.py
+            current_dir = Path(__file__).parent.parent.parent
+            env_path = current_dir / env_path
+        
+        if not Path(env_path).exists():
+            logger.warning(f"Environment file not found at {env_path}")
+            return {}
+            
         # Load .env file
         load_dotenv(env_path)
         

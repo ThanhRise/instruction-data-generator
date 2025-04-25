@@ -2,44 +2,59 @@
 import argparse
 import logging
 from pathlib import Path
+import os
 
 from src.agent import InstructionDataGenerator
+from src.utils.helpers import load_env_config
 from vllm import LLM, SamplingParams
+from huggingface_hub import login
 import yaml
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def load_model_config(config_path: str = "config/model_config.yaml") -> dict:
-    """Load model configuration from YAML file."""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+def setup_huggingface_auth() -> None:
+    """Setup Hugging Face authentication using token from environment config."""
+    env_config = load_env_config()
+    hf_token = env_config.get("api_keys", {}).get("huggingface")
+    
+    if not hf_token:
+        logger.warning("Hugging Face token not found in environment config. Some features may be limited.")
+        return
+    
+    try:
+        login(token=hf_token, write_permission=False)
+        logger.info("Successfully logged in to Hugging Face Hub")
+    except Exception as e:
+        logger.error(f"Failed to login to Hugging Face Hub: {e}")
+        raise
 
-def setup_vllm_model(model_config: dict, model_name: str = "llama2_70b") -> LLM:
-    """Initialize vLLM model with configuration."""
-    model_settings = model_config["models"]["llm_models"].get(model_name)
-    if not model_settings or model_settings["type"] != "vllm":
-        raise ValueError(f"Model {model_name} not found or not a vLLM model")
-    
-    serving_config = model_config["models"]["serving"]["vllm"]
-    
-    llm = LLM(
-        model=model_settings["name"],
-        tensor_parallel_size=serving_config["tensor_parallel_size"],
-        gpu_memory_utilization=serving_config["gpu_memory_utilization"],
-        max_num_batched_tokens=serving_config["max_num_batched_tokens"],
-        trust_remote_code=serving_config["trust_remote_code"],
-        dtype=serving_config["dtype"],
-        quantization_config={
-            "load_in_4bit": serving_config["quantization"]["enabled"],
-            "QuantizationConfig": {
-                "bits": serving_config["quantization"]["bits"],
-                "group_size": serving_config["quantization"]["group_size"]
-            }
-        } if serving_config["quantization"]["enabled"] else None,
-    )
-    return llm
+def load_model_config() -> dict:
+    """Load model configuration from config file."""
+    try:
+        with open("config/model_config.yaml", "r") as f:
+            return yaml.safe_load(f)
+    except Exception as e:
+        logger.error(f"Error loading model config: {e}")
+        raise
+
+def setup_vllm_model(model_config: dict, model_name: str) -> LLM:
+    """Setup vLLM model with configuration."""
+    model_params = model_config.get("models", {}).get(model_name)
+    if not model_params:
+        raise ValueError(f"Model {model_name} not found in config")
+        
+    try:
+        return LLM(
+            model=model_params["path"],
+            trust_remote_code=True,
+            tensor_parallel_size=model_params.get("tensor_parallel_size", 1),
+            dtype=model_params.get("dtype", "auto"),
+            gpu_memory_utilization=model_params.get("gpu_memory_utilization", 0.9)
+        )
+    except Exception as e:
+        logger.error(f"Error initializing vLLM model: {e}")
+        raise
 
 def main():
     parser = argparse.ArgumentParser(description="Run Instruction Data Generator with Llama 3.3")
@@ -81,6 +96,9 @@ def main():
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
     
     try:
+        # Load environment config and setup HF auth
+        setup_huggingface_auth()
+        
         # Load configurations
         model_config = load_model_config()
         

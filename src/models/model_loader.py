@@ -310,12 +310,6 @@ class ModelLoader:
                 gpu_memory_utilization=vllm_config["gpu_memory_utilization"],
                 dtype=vllm_config["dtype"],
                 trust_remote_code=vllm_config["trust_remote_code"],
-                quantization_config={
-                    "load_in_4bit": vllm_config["quantization"]["enabled"],
-                    "bnb_4bit_compute_dtype": vllm_config["dtype"],
-                    "bnb_4bit_quant_type": "nf4",
-                    "bnb_4bit_use_double_quant": True,
-                } if vllm_config["quantization"]["enabled"] else None
             )
         
         # Combine model and task parameters
