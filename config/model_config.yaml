@@ -46,11 +46,41 @@ models:
         top_p: 0.95
         max_new_tokens: 150
 
+    llama3_70b:
+      name: "meta-llama/Llama-3.3-70b-chat-hf"
+      type: "vllm"
+      model_path: "meta-llama/Llama-3.3-70b-chat-hf"
+      parameters:
+        temperature: 0.8
+        top_p: 0.95
+        max_new_tokens: 150
+        tensor_parallel_size: 6
+
+    qwen25_72b:
+      name: "Qwen/Qwen-2.5-72B-Chat"
+      type: "vllm"
+      model_path: "Qwen/Qwen-2.5-72B-Chat"
+      parameters:
+        temperature: 0.8
+        top_p: 0.95
+        max_new_tokens: 150
+        tensor_parallel_size: 6
+
+    qwen2_70b:
+      name: "Qwen/Qwen-2-70B-Chat"
+      type: "vllm"
+      model_path: "Qwen/Qwen-2-70B-Chat"
+      parameters:
+        temperature: 0.8
+        top_p: 0.95
+        max_new_tokens: 150
+        tensor_parallel_size: 6
+
   # Model serving configuration
   serving:
     vllm:
-      tensor_parallel_size: 2
-      gpu_memory_utilization: 0.9
+      tensor_parallel_size: 6  # Updated for larger models
+      gpu_memory_utilization: 0.85  # Slightly reduced to prevent OOM
       max_num_batched_tokens: 4096
       trust_remote_code: true
       dtype: "float16"
@@ -58,6 +88,7 @@ models:
         enabled: true
         bits: 4
         group_size: 128
+        use_double_quant: true  # Enable double quantization for memory efficiency
 
   image_annotation:
     name: "phi-3.5-vision-instruct"  # Alternative: "BLIP-2"

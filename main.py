@@ -5,21 +5,19 @@ from pathlib import Path
 import os
 
 from src.agent import InstructionDataGenerator
-from src.utils.helpers import load_env_config
-from vllm import LLM, SamplingParams
 from huggingface_hub import login
 import yaml
+from dotenv import load_dotenv
+import torch
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def setup_huggingface_auth() -> None:
-    """Setup Hugging Face authentication using token from environment config."""
-    env_config = load_env_config()
-    hf_token = env_config.get("api_keys", {}).get("huggingface")
-    
+    """Setup Hugging Face authentication using token from environment variables."""
+    hf_token = os.getenv("HF_TOKEN")
     if not hf_token:
-        logger.warning("Hugging Face token not found in environment config. Some features may be limited.")
+        logger.warning("HF_TOKEN not found in environment variables. Some features may be limited.")
         return
     
     try:
@@ -29,35 +27,8 @@ def setup_huggingface_auth() -> None:
         logger.error(f"Failed to login to Hugging Face Hub: {e}")
         raise
 
-def load_model_config() -> dict:
-    """Load model configuration from config file."""
-    try:
-        with open("config/model_config.yaml", "r") as f:
-            return yaml.safe_load(f)
-    except Exception as e:
-        logger.error(f"Error loading model config: {e}")
-        raise
-
-def setup_vllm_model(model_config: dict, model_name: str) -> LLM:
-    """Setup vLLM model with configuration."""
-    model_params = model_config.get("models", {}).get(model_name)
-    if not model_params:
-        raise ValueError(f"Model {model_name} not found in config")
-        
-    try:
-        return LLM(
-            model=model_params["path"],
-            trust_remote_code=True,
-            tensor_parallel_size=model_params.get("tensor_parallel_size", 1),
-            dtype=model_params.get("dtype", "auto"),
-            gpu_memory_utilization=model_params.get("gpu_memory_utilization", 0.9)
-        )
-    except Exception as e:
-        logger.error(f"Error initializing vLLM model: {e}")
-        raise
-
 def main():
-    parser = argparse.ArgumentParser(description="Run Instruction Data Generator with Llama 3.3")
+    parser = argparse.ArgumentParser(description="Run Instruction Data Generator with Multiple LLM Support")
     parser.add_argument(
         "--config", 
         type=str, 
@@ -68,7 +39,16 @@ def main():
         "--model", 
         type=str, 
         default="llama2_70b",
-        help="Model name from config (default: llama2_70b)"
+        choices=[
+            "llama2_70b",
+            "llama3_70b",
+            "qwen25_72b",
+            "qwen2_70b",
+            "llama2_13b",
+            "qwen_14b",
+            "phi35"
+        ],
+        help="Model name from config"
     )
     parser.add_argument(
         "--input-dir",
@@ -88,6 +68,11 @@ def main():
         default="logs",
         help="Directory for log files"
     )
+    parser.add_argument(
+        "--max-memory",
+        type=str,
+        help="Max GPU memory per device (e.g., '35GiB')"
+    )
     
     args = parser.parse_args()
     
@@ -96,30 +81,34 @@ def main():
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
     
     try:
-        # Load environment config and setup HF auth
+        # Load environment variables and setup HF auth
+        load_dotenv()
         setup_huggingface_auth()
         
-        # Load configurations
-        model_config = load_model_config()
+        # Set GPU memory limits if specified
+        if args.max_memory:
+            os.environ["PYTORCH_CUDA_ALLOC_CONF"] = f"max_split_size_mb={(int(float(args.max_memory[:-3])*1024*0.8))}"
         
-        # Initialize vLLM model
-        llm = setup_vllm_model(model_config, args.model)
-        logger.info(f"Initialized {args.model} with vLLM")
-        
-        # Initialize the agent with the model instance
+        # Initialize the agent
         agent = InstructionDataGenerator(
             config_path=args.config,
             model_name=args.model,
-            log_dir=args.log_dir,
-            model_instance=llm  # Pass the vLLM model instance
+            log_dir=args.log_dir
         )
         
-        # Start processing
-        logger.info("Starting instruction data generation...")
-        agent.process_input_directory(
-            input_dir=args.input_dir,
-            output_dir=args.output_dir
-        )
+        # Start processing with enhanced monitoring
+        logger.info(f"Starting instruction data generation with {args.model}...")
+        try:
+            agent.process_input_directory(
+                input_dir=args.input_dir,
+                output_dir=args.output_dir
+            )
+        except torch.cuda.OutOfMemoryError:
+            logger.error("GPU Out of Memory error occurred. Consider using a model with lower memory requirements or adjusting batch size.")
+            raise
+        except Exception as e:
+            logger.error(f"Error during processing: {str(e)}", exc_info=True)
+            raise
         
     except Exception as e:
         logger.error(f"Error during execution: {str(e)}", exc_info=True)

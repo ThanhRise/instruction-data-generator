@@ -1,11 +1,5 @@
 from typing import Dict, List, Any, Optional
 import logging
-import torch
-import re
-import random
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-from langchain.prompts import PromptTemplate
-from langchain.llms import OpenAI
 from collections import defaultdict
 from sklearn.metrics.pairwise import cosine_similarity
 

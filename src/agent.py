@@ -33,8 +33,7 @@ class InstructionDataGenerator:
         self,
         config_path: str,
         model_name: Optional[str] = None,
-        log_dir: Optional[str] = None,
-        model_instance: Optional[Any] = None
+        log_dir: Optional[str] = None
     ):
         """
         Initialize the instruction data generator agent.
@@ -43,7 +42,6 @@ class InstructionDataGenerator:
             config_path: Path to configuration file
             model_name: Optional name of the LLM model to use (must be defined in model_config.yaml)
             log_dir: Optional directory for logging
-            model_instance: Optional pre-configured model instance to use instead of loading from config
         """
         if not yaml:
             raise ImportError("PyYAML is required for configuration handling")
@@ -84,22 +82,22 @@ class InstructionDataGenerator:
         setup_logging(log_dir or "logs")
         self.metrics_logger = ModelMetricsLogger(log_dir)
         
-        # Validate model selection if no instance provided
-        if not model_instance and model_name:
+        # Validate model selection
+        if model_name:
             if model_name not in self.config["models"]["llm_models"]:
                 raise ValueError(f"Model {model_name} not found in configuration")
             logger.info(f"Using {model_name} for instruction generation")
         
-        # Initialize components with selected model or instance
+        # Initialize components with selected model
         self.data_loader = DataLoader(self.config)
         self.image_annotator = ImageAnnotator(self.config)
         self.answer_extractor = AnswerExtractor(self.config)
-        self.question_generator = QuestionGenerator(self.config, model_name, model_instance)
-        self.self_instruct = SelfInstructGenerator(self.config, model_name, model_instance)
+        self.question_generator = QuestionGenerator(self.config, model_name)
+        self.self_instruct = SelfInstructGenerator(self.config, model_name)
         self.quality_filter = QualityFilter(self.config)
         
         # Track current model
-        self.current_model = model_name if not model_instance else "custom_model"
+        self.current_model = model_name
     
     def switch_model(self, model_name: str) -> None:
         """

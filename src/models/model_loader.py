@@ -5,12 +5,15 @@ try:
     from langchain.llms import OpenAI
     from langchain.chat_models import ChatOpenAI
     import bitsandbytes
+    from typing import List
     HAS_CUDA = torch.cuda.is_available()
+    NUM_GPUS = torch.cuda.device_count() if HAS_CUDA else 0
 except ImportError as e:
     print(f"Warning: Some model dependencies not available: {e}")
     HAS_CUDA = False
+    NUM_GPUS = 0
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 import logging
 from pathlib import Path
 
@@ -32,7 +35,64 @@ class ModelLoader:
         self.config = self._validate_config(config)
         self.models_cache = {}
         self.vllm_instances = {}
+        self.gpu_allocations = self._initialize_gpu_allocations()
         
+    def _initialize_gpu_allocations(self) -> Dict[str, List[int]]:
+        """Initialize GPU allocations for different model types."""
+        if not HAS_CUDA or NUM_GPUS == 0:
+            return {}
+            
+        # Optimal GPU allocation strategy for 8x A100 40GB setup
+        gpu_map = {
+            # Large LLM models (70B+) - 6 GPUs
+            "llama3_70b": list(range(6)),  # GPUs 0-5
+            "llama2_70b": list(range(6)),  # GPUs 0-5
+            "qwen25_72b": list(range(6)),  # GPUs 0-5
+            "qwen2_70b": list(range(6)),  # GPUs 0-5
+            
+            # Smaller LLMs (13B/14B models) - 1 GPU
+            "llama2_13b": [6],
+            "qwen_14b": [6],
+            "phi35": [6],
+            
+            # Vision models - 1 GPU
+            "vision_models": [7]
+        }
+        return gpu_map
+
+    def _get_gpu_device(self, model_name: str) -> Union[int, List[int]]:
+        """Get assigned GPU device(s) for a model."""
+        if not HAS_CUDA:
+            return -1
+            
+        # Get base model name
+        base_name = model_name.split('/')[-1].lower()
+        
+        # Map model names to their configurations
+        model_patterns = {
+            "llama-3": "llama3_70b",
+            "llama-2-70b": "llama2_70b",
+            "llama-2-13b": "llama2_13b",
+            "qwen-2.5-72b": "qwen25_72b",
+            "qwen-2-70b": "qwen2_70b",
+            "qwen-14b": "qwen_14b",
+            "phi-3.5": "phi35"
+        }
+        
+        # Find matching pattern
+        matched_model = None
+        for pattern, model_key in model_patterns.items():
+            if pattern in base_name:
+                matched_model = model_key
+                break
+        
+        if matched_model and matched_model in self.gpu_allocations:
+            gpus = self.gpu_allocations[matched_model]
+            return gpus[0] if len(gpus) == 1 else gpus
+        
+        # Default to last GPU for unknown models
+        return self.gpu_allocations.get("vision_models", [-1])[0]
+
     def _validate_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """Validate model configuration."""
         if "models" not in config:
@@ -207,20 +267,28 @@ class ModelLoader:
 
     def _estimate_model_memory(self, model_name: str) -> int:
         """Estimate memory requirements for a model."""
-        # Add model size estimates
+        # Model size estimates in bytes
         model_sizes = {
             "gpt-4": 0,  # API model
+            "meta-llama/Llama-3.3-70b-chat-hf": 140e9,
             "meta-llama/Llama-2-70b-chat-hf": 140e9,
+            "Qwen/Qwen-2.5-72B-Chat": 144e9,
+            "Qwen/Qwen-2-70B-Chat": 140e9,
             "meta-llama/Llama-2-13b-chat-hf": 26e9,
             "Qwen/Qwen-14B-Chat": 28e9,
             "microsoft/phi-3.5": 7e9
         }
         
         # Get base model name
-        base_name = model_name.split('-')[0].lower()
+        base_name = model_name.split('/')[-1].lower()
         
-        # Estimate memory needed (2x model size for safe margin)
-        return int(model_sizes.get(model_name, 10e9) * 2)
+        # Find matching model size
+        for model_key, size in model_sizes.items():
+            if model_key.lower().split('/')[-1] in base_name:
+                return int(size * 2)  # 2x model size for safe margin
+        
+        # Default size for unknown models
+        return int(10e9)
 
     def _try_load_in_8bit(self, model_name: str) -> bool:
         """Check if a model supports 8-bit quantization."""
@@ -303,13 +371,45 @@ class ModelLoader:
             # Get vLLM serving configuration
             vllm_config = self.config["models"]["serving"]["vllm"]
             
-            # Initialize vLLM instance
+            # Get GPU allocation and tensor parallelism size
+            gpu_devices = self._get_gpu_device(model_path)
+            tensor_parallel_size = len(gpu_devices) if isinstance(gpu_devices, list) else 1
+            
+            # Setup model-specific tensor parallel size if specified
+            model_tp_size = model_config.get("parameters", {}).get(
+                "tensor_parallel_size",
+                vllm_config["tensor_parallel_size"]
+            )
+            tensor_parallel_size = max(tensor_parallel_size, model_tp_size)
+            
+            # Initialize quantization settings if enabled
+            quantization_config = None
+            quantization = vllm_config.get("quantization", {})
+            if quantization.get("enabled", False):
+                quantization_config = {
+                    "load_in_4bit": True,
+                    "bnb_4bit_quant_type": "nf4",
+                    "bnb_4bit_use_double_quant": quantization.get("use_double_quant", True),
+                    "bnb_4bit_compute_dtype": torch.float16
+                }
+            
+            # Initialize vLLM instance with optimized settings
             self.vllm_instances[model_path] = LLM(
                 model=model_path,
-                tensor_parallel_size=vllm_config["tensor_parallel_size"],
+                tensor_parallel_size=tensor_parallel_size,
                 gpu_memory_utilization=vllm_config["gpu_memory_utilization"],
+                max_num_batched_tokens=vllm_config.get("max_num_batched_tokens", 4096),
+                trust_remote_code=vllm_config.get("trust_remote_code", True),
                 dtype=vllm_config["dtype"],
-                trust_remote_code=vllm_config["trust_remote_code"],
+                quantization=quantization_config,
+                max_model_len=8192,  # Increased context window
+                enforce_eager=False,  # Better memory management
+                seed=42,  # For reproducibility
+            )
+            
+            logger.info(
+                f"Initialized vLLM model {model_path} with tensor parallelism "
+                f"size={tensor_parallel_size}, dtype={vllm_config['dtype']}"
             )
         
         # Combine model and task parameters
@@ -329,10 +429,26 @@ class ModelLoader:
 
     def _load_transformers_model(self, model_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Load model using Hugging Face Transformers."""
+        device = self._get_gpu_device(model_name)
+        
+        # Load tokenizer
         tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
-        model = transformers.AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            device_map="auto"
-        )
+        
+        # Load model with appropriate device mapping
+        if isinstance(device, list):
+            # For multi-GPU setups
+            model = transformers.AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.float16,
+                device_map="balanced",
+                max_memory={f"cuda:{i}": "35GB" for i in device}
+            )
+        else:
+            # For single-GPU setups
+            model = transformers.AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch.float16,
+                device_map={"": f"cuda:{device}" if device >= 0 else "cpu"}
+            )
+        
         return {"model": model, "tokenizer": tokenizer}
