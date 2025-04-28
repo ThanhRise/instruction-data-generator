@@ -1,3 +1,5 @@
+"""Helper functions for the instruction data generator."""
+
 import logging
 from typing import Dict, List, Any, Union, Optional, Callable
 from pathlib import Path
@@ -48,7 +50,7 @@ def setup_logging(log_dir: Union[str, Path], level: str = "INFO") -> None:
 
 def load_yaml_config(file_path: Union[str, Path]) -> Dict[str, Any]:
     """
-    Load configuration from YAML file.
+    Load configuration from YAML file with validation.
     
     Args:
         file_path: Path to YAML configuration file
@@ -62,7 +64,13 @@ def load_yaml_config(file_path: Union[str, Path]) -> Dict[str, Any]:
     try:
         with open(file_path, 'r') as f:
             config = yaml.safe_load(f)
+            
+        # Basic structure validation
+        if not isinstance(config, dict):
+            raise ValueError(f"Invalid config format in {file_path}. Expected dictionary.")
+            
         return config
+        
     except Exception as e:
         logger.error(f"Error loading YAML config from {file_path}: {e}")
         raise
@@ -184,215 +192,6 @@ def chunk_text(text: str, max_length: int = 512, overlap: int = 50) -> List[str]
         
     return chunks
 
-def load_env_config(env_path: Union[str, Path] = "config/.env") -> Dict[str, Any]:
-    """
-    Load configuration from environment file.
-    
-    Args:
-        env_path: Path to environment file, defaults to config/.env
-        
-    Returns:
-        Dictionary containing environment configuration
-    """
-    try:
-        from dotenv import load_dotenv
-        import os
-        
-        # Handle default config path relative to project root
-        if env_path == "config/.env":
-            # Try to find project root by looking for main.py
-            current_dir = Path(__file__).parent.parent.parent
-            env_path = current_dir / env_path
-        
-        if not Path(env_path).exists():
-            logger.warning(f"Environment file not found at {env_path}")
-            return {}
-            
-        # Load .env file
-        load_dotenv(env_path)
-        
-        # Get environment variables
-        env_config = {
-            "api_keys": {
-                "openai": os.getenv("OPENAI_API_KEY"),
-                "huggingface": os.getenv("HF_TOKEN")
-            },
-            "endpoints": {
-                "phi_model": os.getenv("PHI_MODEL_ENDPOINT")
-            },
-            "resources": {
-                "max_gpu_memory": os.getenv("MAX_GPU_MEMORY", "12GB"),
-                "max_cpu_memory": os.getenv("MAX_CPU_MEMORY", "32GB"),
-                "num_workers": int(os.getenv("NUM_WORKERS", "4"))
-            },
-            "paths": {
-                "cache_dir": os.getenv("CACHE_DIR", ".cache"),
-                "model_dir": os.getenv("MODEL_DIR", "models"),
-                "output_dir": os.getenv("OUTPUT_DIR", "data/output")
-            }
-        }
-        
-        return env_config
-        
-    except Exception as e:
-        logger.error(f"Error loading environment config: {e}")
-        raise
-
-def merge_configs(*config_files: Union[str, Path], env_file: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
-    """
-    Merge multiple configuration files with optional environment variables.
-    Later configs override earlier ones.
-    
-    Args:
-        *config_files: Paths to configuration files
-        env_file: Optional path to environment file
-        
-    Returns:
-        Merged configuration dictionary
-    """
-    if not yaml:
-        raise ImportError("PyYAML is required for config file handling")
-    
-    merged = {}
-    config_sources = {}  # Track which file each config key came from
-    
-    # Load and merge YAML configs
-    for config_file in config_files:
-        try:
-            config = load_yaml_config(config_file)
-            
-            # Track conflicting keys
-            for key in config:
-                if key in merged:
-                    # Check for potential conflicts
-                    if isinstance(merged[key], dict) and isinstance(config[key], dict):
-                        # Detect structural conflicts in nested dictionaries
-                        conflicts = _detect_structural_conflicts(
-                            merged[key], 
-                            config[key], 
-                            key,
-                            config_sources[key],
-                            str(config_file)
-                        )
-                        if conflicts:
-                            raise ValueError(
-                                f"Configuration conflict detected:\n" + "\n".join(conflicts)
-                            )
-                    config_sources[key] = f"{config_sources[key]}, {config_file}"
-                else:
-                    config_sources[key] = str(config_file)
-            
-            # Perform deep merge
-            merged = _deep_merge_configs(merged, config)
-            
-        except Exception as e:
-            logger.error(f"Error merging config from {config_file}: {e}")
-            raise
-    
-    # Load and merge environment config if provided
-    if env_file:
-        try:
-            env_config = load_env_config(env_file)
-            
-            # Update specific sections with environment values
-            if "optimization" in merged:
-                merged["optimization"]["max_memory"] = {
-                    "gpu": env_config["resources"]["max_gpu_memory"],
-                    "cpu": env_config["resources"]["max_cpu_memory"]
-                }
-            
-            if "paths" in merged:
-                merged["paths"].update(env_config["paths"])
-                
-            # Add API keys and endpoints section
-            merged["api_keys"] = env_config["api_keys"]
-            merged["endpoints"] = env_config["endpoints"]
-            
-        except Exception as e:
-            logger.error(f"Error merging environment config: {e}")
-            raise
-            
-    return merged
-
-def _detect_structural_conflicts(
-    dict1: Dict[str, Any],
-    dict2: Dict[str, Any],
-    path: str,
-    source1: str,
-    source2: str
-) -> List[str]:
-    """
-    Detect structural conflicts between two dictionaries.
-    
-    Args:
-        dict1: First dictionary
-        dict2: Second dictionary
-        path: Current path in the config hierarchy
-        source1: Source file of first dictionary
-        source2: Source file of second dictionary
-        
-    Returns:
-        List of conflict messages, empty if no conflicts
-    """
-    conflicts = []
-    
-    for key in set(dict1.keys()) | set(dict2.keys()):
-        current_path = f"{path}.{key}"
-        
-        # Check if key exists in both dictionaries
-        if key in dict1 and key in dict2:
-            val1, val2 = dict1[key], dict2[key]
-            
-            # Check for type mismatches
-            if type(val1) != type(val2):
-                conflicts.append(
-                    f"Type mismatch at {current_path}:\n"
-                    f"  {source1}: {type(val1).__name__}\n"
-                    f"  {source2}: {type(val2).__name__}"
-                )
-            
-            # Recursively check nested dictionaries
-            elif isinstance(val1, dict) and isinstance(val2, dict):
-                nested_conflicts = _detect_structural_conflicts(
-                    val1, val2, current_path, source1, source2
-                )
-                conflicts.extend(nested_conflicts)
-                
-            # Check for value conflicts in non-dictionary types
-            elif val1 != val2:
-                conflicts.append(
-                    f"Value conflict at {current_path}:\n"
-                    f"  {source1}: {val1}\n"
-                    f"  {source2}: {val2}"
-                )
-    
-    return conflicts
-
-def _deep_merge_configs(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Perform a deep merge of two configuration dictionaries.
-    
-    Args:
-        base: Base configuration dictionary
-        override: Override configuration dictionary
-        
-    Returns:
-        Merged configuration dictionary
-    """
-    merged = base.copy()
-    
-    for key, value in override.items():
-        if (
-            key in merged 
-            and isinstance(merged[key], dict) 
-            and isinstance(value, dict)
-        ):
-            merged[key] = _deep_merge_configs(merged[key], value)
-        else:
-            merged[key] = value
-            
-    return merged
-
 def validate_config(config: Dict[str, Any], required_keys: List[str]) -> bool:
     """
     Validate configuration has required keys and correct structure.
@@ -451,6 +250,22 @@ def _validate_agent_config(agent_config: Dict[str, Any]) -> bool:
         logger.error(f"Missing required agent config sections: {missing}")
         return False
         
+    # Validate instruction generation settings
+    instruction_gen = agent_config.get("instruction_generation", {})
+    if not isinstance(instruction_gen.get("min_question_length", 0), int):
+        logger.error("Invalid min_question_length in instruction_generation")
+        return False
+        
+    if not isinstance(instruction_gen.get("max_question_length", 0), int):
+        logger.error("Invalid max_question_length in instruction_generation")
+        return False
+        
+    # Validate quality control settings
+    quality_control = agent_config.get("quality_control", {})
+    if not isinstance(quality_control.get("min_quality_score", 0), (int, float)):
+        logger.error("Invalid min_quality_score in quality_control")
+        return False
+        
     return True
 
 def _validate_model_config(model_config: Dict[str, Any]) -> bool:
@@ -463,6 +278,7 @@ def _validate_model_config(model_config: Dict[str, Any]) -> bool:
     Returns:
         True if valid, False otherwise
     """
+    # Check required sections
     required_sections = [
         "llm_models",
         "serving",
@@ -479,6 +295,39 @@ def _validate_model_config(model_config: Dict[str, Any]) -> bool:
         logger.error(f"Missing required model config sections: {missing}")
         return False
         
+    # Validate LLM models section
+    llm_models = model_config.get("llm_models", {})
+    for model_name, model_info in llm_models.items():
+        if not isinstance(model_info, dict):
+            logger.error(f"Invalid model info for {model_name}")
+            return False
+            
+        # Check required model fields
+        required_fields = ["name", "type"]
+        missing_fields = [f for f in required_fields if f not in model_info]
+        if missing_fields:
+            logger.error(f"Model {model_name} missing required fields: {missing_fields}")
+            return False
+            
+        # Validate model type
+        if model_info["type"] not in ["api", "vllm", "transformers"]:
+            logger.error(f"Invalid model type for {model_name}: {model_info['type']}")
+            return False
+            
+    # Validate serving configuration
+    serving = model_config.get("serving", {})
+    if "vllm" in serving:
+        vllm_config = serving["vllm"]
+        required_vllm_fields = [
+            "tensor_parallel_size",
+            "gpu_memory_utilization",
+            "dtype"
+        ]
+        missing_vllm = [f for f in required_vllm_fields if f not in vllm_config]
+        if missing_vllm:
+            logger.error(f"Missing required vLLM serving fields: {missing_vllm}")
+            return False
+            
     return True
 
 class ModelMetricsLogger:

@@ -3,6 +3,7 @@ import argparse
 import logging
 from pathlib import Path
 import os
+from typing import Optional
 
 from src.agent import InstructionDataGenerator
 from huggingface_hub import login
@@ -27,13 +28,53 @@ def setup_huggingface_auth() -> None:
         logger.error(f"Failed to login to Hugging Face Hub: {e}")
         raise
 
+def load_environment(env_path: Optional[Path] = None) -> None:
+    """
+    Load environment variables from .env file.
+    
+    Args:
+        env_path: Optional path to .env file. If not provided, will look in default locations.
+    """
+    try:
+        # Try provided path first
+        if env_path and env_path.exists():
+            load_dotenv(env_path)
+            logger.info(f"Loaded environment from {env_path}")
+            return
+
+        # Try default locations
+        config_dir = Path(__file__).parent / "config"
+        default_paths = [
+            config_dir / ".env",
+            Path(".env"),
+            Path("config/.env")
+        ]
+
+        for path in default_paths:
+            if path.exists():
+                load_dotenv(path)
+                logger.info(f"Loaded environment from {path}")
+                return
+
+        logger.warning("No .env file found in default locations")
+        
+    except Exception as e:
+        logger.error(f"Error loading environment: {e}")
+        raise
+
 def main():
     parser = argparse.ArgumentParser(description="Run Instruction Data Generator with Multiple LLM Support")
     parser.add_argument(
-        "--config", 
+        "--agent-config", 
         type=str, 
         default="config/agent_config.yaml",
         help="Path to agent configuration file"
+    )
+    parser.add_argument(
+        "--model-config",
+        type=str,
+        default="config/model_config.yaml",
+        help="Path to model configuration file"
     )
     parser.add_argument(
         "--model", 
@@ -81,17 +122,22 @@ def main():
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
     
     try:
-        # Load environment variables and setup HF auth
-        load_dotenv()
+        # Get base directory for config files
+        config_dir = Path(args.agent_config).parent
+        env_file = config_dir / ".env"
+        
+        # Load environment and setup auth
+        load_environment(env_file if env_file.exists() else None)
         setup_huggingface_auth()
         
         # Set GPU memory limits if specified
         if args.max_memory:
             os.environ["PYTORCH_CUDA_ALLOC_CONF"] = f"max_split_size_mb={(int(float(args.max_memory[:-3])*1024*0.8))}"
         
-        # Initialize the agent
+        # Initialize the agent with model configs
         agent = InstructionDataGenerator(
-            config_path=args.config,
+            agent_config_path=args.agent_config,
+            model_config_path=args.model_config,
             model_name=args.model,
             log_dir=args.log_dir
         )
@@ -99,7 +145,7 @@ def main():
         # Start processing with enhanced monitoring
         logger.info(f"Starting instruction data generation with {args.model}...")
         try:
-            agent.process_input_directory(
+            agent.generate_instruction_data(
                 input_dir=args.input_dir,
                 output_dir=args.output_dir
             )

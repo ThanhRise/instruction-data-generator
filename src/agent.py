@@ -18,6 +18,10 @@ from .instruction_generation.question_generator import QuestionGenerator
 from .instruction_generation.self_instruct import SelfInstructGenerator
 from .quality_control.quality_filter import QualityFilter
 from .utils.helpers import (
+    _validate_agent_config,
+    _validate_model_config,
+    load_env_config,
+    load_yaml_config,
     setup_logging,
     ModelMetricsLogger,
     timed_execution,
@@ -33,18 +37,28 @@ class InstructionDataGenerator:
     
     def __init__(
         self,
-        config_path: str,
+        agent_config_path: str,
+        model_config_path: str,
         model_name: Optional[str] = None,
         log_dir: Optional[str] = None
     ):
         """
         Initialize the instruction data generator agent.
+        
+        Args:
+            agent_config_path: Path to agent configuration file
+            model_config_path: Path to model configuration file
+            model_name: Optional name of the LLM model to use
+            log_dir: Optional directory for logging
         """
         if not yaml:
             raise ImportError("PyYAML is required for configuration handling")
             
-        # Load and validate configuration
-        self.config = self._load_config(config_path)
+        # Load and merge configurations
+        self.config = self._load_and_validate_configs(
+            agent_config_path,
+            model_config_path
+        )
         
         # Set up logging
         setup_logging(log_dir or "logs")
@@ -63,6 +77,46 @@ class InstructionDataGenerator:
         
         # Track current model
         self.current_model = model_name
+
+    def _load_and_validate_configs(
+        self,
+        agent_config_path: str,
+        model_config_path: str
+    ) -> Dict[str, Any]:
+        """
+        Load and validate agent and model configurations.
+        
+        Args:
+            agent_config_path: Path to agent configuration
+            model_config_path: Path to model configuration
+            
+        Returns:
+            Merged configuration dictionary
+        """
+        try:
+            # Load individual configs first
+            agent_config = load_yaml_config(agent_config_path)
+            model_config = load_yaml_config(model_config_path)
+            
+            # Validate individual configs
+            if not _validate_agent_config(agent_config.get("agent", {})):
+                raise ValueError("Invalid agent configuration")
+                
+            if not _validate_model_config(model_config.get("models", {})):
+                raise ValueError("Invalid model configuration")
+            
+            # Merge configurations
+            merged_config = {
+                "agent": agent_config.get("agent", {}),
+                "models": model_config.get("models", {}),
+                "paths": agent_config.get("paths", {})
+            }
+            
+            return merged_config
+            
+        except Exception as e:
+            logger.error(f"Error loading configurations: {e}")
+            raise
 
     def switch_model(self, model_name: str) -> None:
         """Switch to a different LLM model."""

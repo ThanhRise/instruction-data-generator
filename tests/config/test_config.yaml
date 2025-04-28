@@ -1,0 +1,41 @@
+agent:
+  input_processing:
+    max_workers: 4
+    batch_size: 100
+    supported_formats:
+      - ".txt"
+      - ".md"
+      - ".json"
+  
+  instruction_generation:
+    min_question_length: 10
+    max_question_length: 150
+    min_answer_length: 20
+    max_answer_length: 500
+  
+  quality_control:
+    min_quality_score: 0.7
+    duplicate_threshold: 0.85
+  
+  document_processing:
+    chunk_size: 512
+    overlap: 50
+
+models:
+  llm_models:
+    test_model:
+      name: "test-model"
+      type: "vllm"
+      model_path: "test/models/test-model"
+  
+  serving:
+    vllm:
+      tensor_parallel_size: 1
+      gpu_memory_utilization: 0.8
+      dtype: "float16"
+  
+  document_understanding:
+    spacy_model: "en_core_web_sm"
+  
+  image_processing:
+    vision_model: "test-vision-model"
