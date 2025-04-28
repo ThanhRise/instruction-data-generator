@@ -31,25 +31,21 @@ class ModelLoader:
     """Handles loading and configuration of different AI models with singleton pattern."""
     
     _instance = None
-    _models = {}  # Shared model instances
-    
+    _shared_llm = None  # Single shared LLM instance
+    _initialized = False
+
     def __new__(cls, config: Dict[str, Any]):
-        """Implement singleton pattern."""
         if cls._instance is None:
             cls._instance = super(ModelLoader, cls).__new__(cls)
-            cls._instance._initialized = False
         return cls._instance
-    
+
     def __init__(self, config: Dict[str, Any]):
-        """Initialize the model loader if not already initialized."""
-        if self._initialized:
-            return
-            
-        self.config = self._validate_config(config)
-        self.vllm_instances = {}
-        self.gpu_allocations = self._initialize_gpu_allocations()
-        self._initialized = True
-        
+        if not self._initialized:
+            self.config = self._validate_config(config)
+            self.vllm_instances = {}
+            self.gpu_allocations = self._initialize_gpu_allocations()
+            self._initialized = True
+
     def _initialize_gpu_allocations(self) -> Dict[str, List[int]]:
         """Initialize GPU allocations for different model types."""
         if not HAS_CUDA or NUM_GPUS == 0:
@@ -312,24 +308,51 @@ class ModelLoader:
             logger.warning(f"bitsandbytes not available, cannot load {model_name} in 8-bit")
             return False
 
-    def get_shared_model(self, task_type: str, model_name: Optional[str] = None) -> Dict[str, Any]:
+    def get_shared_llm(self, model_name: Optional[str] = None) -> Dict[str, Any]:
         """
-        Get a shared model instance for a specific task type, creating it if needed.
-        This ensures model reuse across different components.
+        Get the shared LLM instance, creating it if needed.
+        This ensures a single LLM instance is shared across all components.
+        
+        Args:
+            model_name: Optional specific model to use instead of default
+            
+        Returns:
+            Dictionary containing model and its configuration
         """
-        cache_key = f"{task_type}_{model_name}" if model_name else task_type
-        
-        if cache_key not in self._models:
-            self._models[cache_key] = self.get_model(task_type, model_name)
-            logger.info(f"Created new shared model instance for {cache_key}")
-        
-        return self._models[cache_key]
+        if self._shared_llm is None:
+            logger.info(f"Creating shared LLM instance with model: {model_name}")
+            
+            # Get model configuration
+            if model_name:
+                if model_name not in self.config["models"]["llm_models"]:
+                    raise ValueError(f"Model {model_name} not found in configuration")
+                model_config = self.config["models"]["llm_models"][model_name]
+            else:
+                default_model = self.config["models"].get("default_model")
+                if not default_model:
+                    raise ValueError("No default model specified in configuration")
+                model_config = self.config["models"]["llm_models"][default_model]
+            
+            # Initialize the model based on its type
+            if model_config["type"] == "vllm":
+                self._shared_llm = self._load_vllm_model(model_config)
+            elif model_config["type"] == "transformers":
+                self._shared_llm = self._load_transformers_model(model_config["name"])
+            elif model_config["type"] == "api":
+                self._shared_llm = self._load_api_model(model_config["name"], model_config.get("parameters", {}))
+            else:
+                raise ValueError(f"Unsupported model type: {model_config['type']}")
 
-    def clear_cache(self) -> None:
-        """Clear all model caches and instances."""
+        return self._shared_llm
+
+    def clear_llm_cache(self) -> None:
+        """Clear the shared LLM instance and GPU cache."""
         try:
-            # Clear shared models
-            self._models.clear()
+            if self._shared_llm:
+                # Clear model instance
+                if "vllm" in str(type(self._shared_llm["model"])):
+                    del self._shared_llm["model"]
+                self._shared_llm = None
             
             # Clear vLLM instances
             for instance in self.vllm_instances.values():
@@ -339,12 +362,12 @@ class ModelLoader:
                     logger.warning(f"Error cleaning up vLLM instance: {e}")
             self.vllm_instances.clear()
             
-            # Force CUDA cache clear
+            # Force CUDA cache clear if available
             if HAS_CUDA:
                 torch.cuda.empty_cache()
                 
         except Exception as e:
-            logger.error(f"Error clearing model cache: {e}")
+            logger.error(f"Error clearing LLM cache: {e}")
 
     def get_model_info(self, model_name: str) -> Dict[str, Any]:
         """Get information about a model's configuration and status."""

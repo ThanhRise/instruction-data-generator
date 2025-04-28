@@ -24,12 +24,8 @@ class AnswerExtractor:
         
         # Get shared LLM instance
         self.model_loader = ModelLoader(config)
-        if model_name:
-            self.model_name = model_name
-        else:
-            self.model_name = self.config["models"]["llm_models"].get("default", "gpt-4")
-        
-        self.llm = self.model_loader.get_shared_model("answer_extraction", self.model_name)
+        self.model_name = model_name if model_name else self.config["models"]["llm_models"].get("default", "gpt-4")
+        self.llm = self.model_loader.get_shared_llm(self.model_name)
         
         # Load few-shot examples for answer extraction
         self.few_shot_examples = self._load_few_shot_examples()

@@ -31,7 +31,7 @@ class SelfInstructGenerator:
             }
         else:
             self.model_name = model_name if model_name else self.config["models"]["llm_models"].get("default", "gpt-4")
-            self.model = self.model_loader.get_shared_model("self_instruct", self.model_name)
+            self.model = self.model_loader.get_shared_llm(self.model_name)
     
     def generate_instructions(
         self,

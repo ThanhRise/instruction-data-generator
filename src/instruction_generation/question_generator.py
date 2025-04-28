@@ -15,14 +15,13 @@ class QuestionGenerator:
         self.config = config
         self.gen_config = config["agent"]["instruction_generation"]
         
+        # Initialize NLP components first
+        self._initialize_components()
+        
         # Get shared LLM instance
         self.model_loader = ModelLoader(config)
-        if model_name:
-            self.model_name = model_name
-        else:
-            self.model_name = self.config["models"]["llm_models"].get("default", "gpt-4")
-        
-        self.llm = self.model_loader.get_shared_model("question_generation", self.model_name)
+        self.model_name = model_name if model_name else self.config["models"]["llm_models"].get("default", "gpt-4")
+        self.llm = self.model_loader.get_shared_llm(self.model_name)
         
         # Initialize other components
         self._initialize_components()

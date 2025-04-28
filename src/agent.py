@@ -39,61 +39,21 @@ class InstructionDataGenerator:
     ):
         """
         Initialize the instruction data generator agent.
-        
-        Args:
-            config_path: Path to configuration file
-            model_name: Optional name of the LLM model to use (must be defined in model_config.yaml)
-            log_dir: Optional directory for logging
         """
         if not yaml:
             raise ImportError("PyYAML is required for configuration handling")
             
-        config_dir = Path(config_path).parent
-        self.config = merge_configs(
-            config_path,
-            config_dir / "model_config.yaml",
-            env_file=config_dir / ".env"
-        )
-        
-        # Validate configuration
-        required_config_sections = [
-            "models",
-            "agent"
-        ]
-        if not validate_config(self.config, required_config_sections):
-            raise ValueError("Invalid configuration: Missing top-level sections")
-            
-        # Additional validation of required agent subsections
-        required_agent_sections = [
-            "input_processing",
-            "data_processing",
-            "instruction_generation",
-            "quality_control",
-            "document_processing"
-        ]
-        missing_agent_sections = [
-            section for section in required_agent_sections 
-            if section not in self.config["agent"]
-        ]
-        if missing_agent_sections:
-            raise ValueError(
-                f"Invalid agent configuration: Missing sections: {', '.join(missing_agent_sections)}"
-            )
+        # Load and validate configuration
+        self.config = self._load_config(config_path)
         
         # Set up logging
         setup_logging(log_dir or "logs")
         self.metrics_logger = ModelMetricsLogger(log_dir)
         
-        # Validate model selection
-        if model_name:
-            if model_name not in self.config["models"]["llm_models"]:
-                raise ValueError(f"Model {model_name} not found in configuration")
-            logger.info(f"Using {model_name} for instruction generation")
-        
-        # Initialize ModelLoader singleton first
+        # Initialize ModelLoader first to ensure singleton pattern
         self.model_loader = ModelLoader(self.config)
         
-        # Initialize components with shared model instance
+        # Initialize components with shared model
         self.data_loader = DataLoader(self.config)
         self.image_annotator = ImageAnnotator(self.config)
         self.answer_extractor = AnswerExtractor(self.config, model_name)
@@ -105,25 +65,25 @@ class InstructionDataGenerator:
         self.current_model = model_name
 
     def switch_model(self, model_name: str) -> None:
-        """
-        Switch to a different LLM model.
-        
-        Args:
-            model_name: Name of the model to switch to
-        """
+        """Switch to a different LLM model."""
         if model_name not in self.config["models"]["llm_models"]:
             raise ValueError(f"Model {model_name} not found in configuration")
             
-        # Clear model loader cache first
-        self.model_loader.clear_cache()
-        
-        # Update components with new model
-        self.answer_extractor = AnswerExtractor(self.config, model_name)
-        self.question_generator = QuestionGenerator(self.config, model_name)
-        self.self_instruct = SelfInstructGenerator(self.config, model_name)
-        self.current_model = model_name
-        
-        logger.info(f"Switched to model: {model_name}")
+        try:
+            # Clear existing model cache
+            self.model_loader.clear_llm_cache()
+            
+            # Reinitialize components with new model
+            self.answer_extractor = AnswerExtractor(self.config, model_name)
+            self.question_generator = QuestionGenerator(self.config, model_name)
+            self.self_instruct = SelfInstructGenerator(self.config, model_name)
+            
+            self.current_model = model_name
+            logger.info(f"Switched to model: {model_name}")
+            
+        except Exception as e:
+            logger.error(f"Error switching model: {e}")
+            raise
     
     def get_model_performance(self) -> Dict[str, Any]:
         """Get performance metrics for current model."""
