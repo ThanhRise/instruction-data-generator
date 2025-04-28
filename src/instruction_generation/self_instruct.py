@@ -17,21 +17,21 @@ class SelfInstructGenerator:
         Args:
             config: Configuration dictionary
             model_name: Optional specific model to use instead of default
-            model_instance: Optional pre-configured model instance to use instead of loading from config
+            model_instance: Optional pre-configured model instance to use instead of loading
         """
         self.config = config
-        self.model_name = model_name if not model_instance else "custom_model"
         
+        # Get shared LLM instance
+        self.model_loader = ModelLoader(config)
         if model_instance:
-            # Use provided model instance
+            self.model_name = "custom_model"
             self.model = {
                 "model": model_instance,
                 "sampling_params": self.config["models"]["serving"]["vllm"]
             }
         else:
-            # Initialize model loader and load from config
-            self.model_loader = ModelLoader(config)
-            self.model = self.model_loader.get_model("self_instruct", model_name)
+            self.model_name = model_name if model_name else self.config["models"]["llm_models"].get("default", "gpt-4")
+            self.model = self.model_loader.get_shared_model("self_instruct", self.model_name)
     
     def generate_instructions(
         self,

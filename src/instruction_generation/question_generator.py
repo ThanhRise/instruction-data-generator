@@ -3,14 +3,28 @@ import logging
 from collections import defaultdict
 from sklearn.metrics.pairwise import cosine_similarity
 
+from ..models.model_loader import ModelLoader  # Assuming ModelLoader is defined in model_loader.py
+
 logger = logging.getLogger(__name__)
 
 class QuestionGenerator:
     """Generates questions from extracted answers."""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], model_name: Optional[str] = None):
+        """Initialize the question generator."""
         self.config = config
         self.gen_config = config["agent"]["instruction_generation"]
+        
+        # Get shared LLM instance
+        self.model_loader = ModelLoader(config)
+        if model_name:
+            self.model_name = model_name
+        else:
+            self.model_name = self.config["models"]["llm_models"].get("default", "gpt-4")
+        
+        self.llm = self.model_loader.get_shared_model("question_generation", self.model_name)
+        
+        # Initialize other components
         self._initialize_components()
     
     def _initialize_components(self):
@@ -181,34 +195,275 @@ class QuestionGenerator:
         answers: List[Dict[str, Any]],
         content: str
     ) -> List[Dict[str, Any]]:
-        """Generate questions for text-based answers."""
+        """Generate questions for text-based answers using LLM and traditional methods."""
         qa_pairs = []
         
         for answer in answers:
-            # Get appropriate templates
-            templates = self.templates["text"].get(
-                answer["subtype"],
-                self.templates["text"]["fact"]  # Default to fact templates
-            )
+            # Get base questions using templates first
+            template_questions = self._generate_from_templates(answer, content)
+            qa_pairs.extend(template_questions)
             
-            # Generate questions using templates
-            for template in templates:
-                # Extract subject for fact-based questions
-                if answer["subtype"] == "fact":
-                    doc = self.nlp(answer["text"])
-                    subjects = [tok for tok in doc if tok.dep_ == "nsubj"]
-                    subject = subjects[0].text if subjects else "this"
-                    question = template.format(subject=subject)
-                else:
-                    question = template.format(placeholder=answer["text"])
+            # Generate questions using LLM
+            llm_questions = self._generate_llm_questions(answer, content)
+            qa_pairs.extend(llm_questions)
+            
+            # Refine questions through multi-turn generation
+            refined_pairs = self._refine_questions(qa_pairs, answer, content)
+            
+            qa_pairs = refined_pairs
+        
+        return qa_pairs
+    
+    def _generate_llm_questions(self, answer: Dict[str, Any], context: str) -> List[Dict[str, Any]]:
+        """Generate questions using LLM with various question types."""
+        try:
+            # Prepare prompt for diverse question generation
+            prompt = f"""You are an expert at generating diverse and high-quality questions based on given answers.
+
+Context: {context}
+
+Answer: {answer['text']}
+Answer Type: {answer['type']}
+Reasoning: {answer.get('reasoning', 'Key information from the text')}
+
+Generate 3-5 different types of questions that would lead to this answer. Include:
+1. A factual/direct question
+2. An inferential/reasoning question
+3. A descriptive/detail-oriented question
+
+For each question:
+1. Ensure it can be answered accurately using ONLY the provided context
+2. Make it clear and specific
+3. Use varied question structures
+4. Include verification that answer matches the question
+
+Format each question as:
+Question Type: [type]
+Question: [question]
+Verification: [explain how this matches the answer]
+Complexity: [score 0-1]
+
+Begin generation:"""
+
+            # Get LLM response
+            model_dict = self.llm
+            if "vllm" in str(type(model_dict["model"])):
+                response = self._get_vllm_response(model_dict["model"], prompt)
+            else:
+                response = model_dict["model"](prompt)
+
+            # Parse response into question dictionaries
+            questions = []
+            current_question = {}
+            
+            for line in response.split('\n'):
+                line = line.strip()
+                if not line:
+                    if current_question.get('question'):
+                        questions.append(current_question.copy())
+                        current_question = {}
+                    continue
                 
-                qa_pairs.append({
-                    "question": question,
-                    "answer": answer["text"],
-                    "type": "text",
-                    "context": answer["context"],
-                    "score": answer["score"]
-                })
+                if line.startswith('Question Type:'):
+                    if current_question.get('question'):
+                        questions.append(current_question.copy())
+                    current_question = {
+                        'type': line[13:].strip().lower(),
+                        'answer': answer['text'],
+                        'context': context,
+                        'source': 'llm'
+                    }
+                elif line.startswith('Question:'):
+                    current_question['question'] = line[9:].strip()
+                elif line.startswith('Verification:'):
+                    current_question['verification'] = line[13:].strip()
+                elif line.startswith('Complexity:'):
+                    try:
+                        current_question['score'] = float(line[11:].strip())
+                    except:
+                        current_question['score'] = 0.8
+
+            # Add final question if exists
+            if current_question.get('question'):
+                questions.append(current_question)
+
+            # Validate questions
+            validated_questions = []
+            for q in questions:
+                if self._validate_question(q['question'], q['answer'], context):
+                    validated_questions.append(q)
+                else:
+                    logger.warning(f"Question '{q['question']}' failed validation - discarding")
+
+            return validated_questions
+
+        except Exception as e:
+            logger.error(f"Error in LLM question generation: {e}")
+            return []
+
+    def _refine_questions(
+        self,
+        questions: List[Dict[str, Any]],
+        answer: Dict[str, Any],
+        context: str
+    ) -> List[Dict[str, Any]]:
+        """Refine questions through multi-turn generation."""
+        try:
+            # Prepare refinement prompt
+            questions_text = "\n".join([
+                f"Q{i+1}: {q['question']}\nType: {q['type']}"
+                for i, q in enumerate(questions)
+            ])
+            
+            prompt = f"""Review and improve these questions that lead to the answer: "{answer['text']}"
+
+Context: {context}
+
+Current Questions:
+{questions_text}
+
+For each question, suggest improvements considering:
+1. Clarity and specificity
+2. Natural language flow
+3. Appropriateness for the answer
+4. Question structure variety
+
+Provide improved versions where needed in this format:
+Original: [original question]
+Improved: [improved version]
+Reasoning: [why this is better]
+Keep/Replace: [decision]
+
+Begin review:"""
+
+            # Get LLM response
+            model_dict = self.llm
+            if "vllm" in str(type(model_dict["model"])):
+                response = self._get_vllm_response(model_dict["model"], prompt)
+            else:
+                response = model_dict["model"](prompt)
+
+            # Parse refinements and update questions
+            refined_questions = questions.copy()
+            current_refinement = {}
+            
+            for line in response.split('\n'):
+                line = line.strip()
+                if not line:
+                    if current_refinement.get('original') and current_refinement.get('improved'):
+                        # Find and update matching question
+                        for q in refined_questions:
+                            if q['question'] == current_refinement['original']:
+                                if current_refinement['decision'].lower() == 'replace':
+                                    q['question'] = current_refinement['improved']
+                                    q['refinement_reason'] = current_refinement['reasoning']
+                                break
+                        current_refinement = {}
+                    continue
+                
+                if line.startswith('Original:'):
+                    current_refinement['original'] = line[9:].strip()
+                elif line.startswith('Improved:'):
+                    current_refinement['improved'] = line[9:].strip()
+                elif line.startswith('Reasoning:'):
+                    current_refinement['reasoning'] = line[10:].strip()
+                elif line.startswith('Keep/Replace:'):
+                    current_refinement['decision'] = line[12:].strip()
+
+            # Handle final refinement
+            if current_refinement.get('original') and current_refinement.get('improved'):
+                for q in refined_questions:
+                    if q['question'] == current_refinement['original']:
+                        if current_refinement['decision'].lower() == 'replace':
+                            q['question'] = current_refinement['improved']
+                            q['refinement_reason'] = current_refinement['reasoning']
+                        break
+
+            return refined_questions
+
+        except Exception as e:
+            logger.error(f"Error in question refinement: {e}")
+            return questions
+
+    def _validate_question(self, question: str, answer: str, context: str) -> bool:
+        """Validate that a question is answerable from the context and matches the answer."""
+        try:
+            # Prepare validation prompt
+            prompt = f"""Validate if this question-answer pair is valid based on the given context.
+
+Context: {context}
+
+Question: {question}
+Proposed Answer: {answer}
+
+Check the following:
+1. Can the question be answered using ONLY the information in the context?
+2. Is the proposed answer correct and complete for this question?
+3. Is there a clear logical connection between the question and answer?
+
+Respond with:
+Valid: [true/false]
+Reason: [explanation]
+
+Analysis:"""
+
+            # Get LLM response
+            model_dict = self.llm
+            if "vllm" in str(type(model_dict["model"])):
+                response = self._get_vllm_response(model_dict["model"], prompt)
+            else:
+                response = model_dict["model"](prompt)
+
+            # Parse validation result
+            valid = False
+            for line in response.split('\n'):
+                if line.startswith('Valid:'):
+                    valid = line[6:].strip().lower() == 'true'
+                    break
+
+            return valid
+
+        except Exception as e:
+            logger.error(f"Error in question validation: {e}")
+            return False
+
+    def _get_vllm_response(self, model: Any, prompt: str) -> str:
+        """Get response from vLLM model."""
+        outputs = model.generate([prompt], sampling_params=self.llm["sampling_params"])
+        return outputs[0].outputs[0].text if outputs else ""
+
+    def _generate_from_templates(
+        self,
+        answer: Dict[str, Any],
+        content: str
+    ) -> List[Dict[str, Any]]:
+        """Generate questions from templates based on the answer and content."""
+        qa_pairs = []
+        
+        # Get appropriate templates
+        templates = self.templates["text"].get(
+            answer["subtype"],
+            self.templates["text"]["fact"]  # Default to fact templates
+        )
+        
+        # Generate questions using templates
+        for template in templates:
+            # Extract subject for fact-based questions
+            if answer["subtype"] == "fact":
+                doc = self.nlp(answer["text"])
+                subjects = [tok for tok in doc if tok.dep_ == "nsubj"]
+                subject = subjects[0].text if subjects else "this"
+                question = template.format(subject=subject)
+            else:
+                question = template.format(placeholder=answer["text"])
+            
+            qa_pairs.append({
+                "question": question,
+                "answer": answer["text"],
+                "type": "text",
+                "context": answer["context"],
+                "score": answer["score"]
+            })
         
         return qa_pairs
     

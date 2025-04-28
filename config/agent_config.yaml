@@ -138,7 +138,7 @@ agent:
       use_visual_qa: true
       use_scene_understanding: true
       use_ocr: true
-      object_detection_model: "microsoft/faster-rcnn-resnet50-fpn"
+      object_detection_model: "facebook/detr-resnet-50"
       caption_model: "Salesforce/blip2-opt-2.7b"
       vqa_model: "dandelin/vilt-b32-finetuned-vqa"
       scene_model: "microsoft/git-large-coco"

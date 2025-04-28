@@ -3,6 +3,8 @@ import logging
 from pathlib import Path
 import json
 
+from .models.model_loader import ModelLoader
+
 # Optional dependencies with fallbacks
 try:
     import yaml
@@ -88,17 +90,20 @@ class InstructionDataGenerator:
                 raise ValueError(f"Model {model_name} not found in configuration")
             logger.info(f"Using {model_name} for instruction generation")
         
-        # Initialize components with selected model
+        # Initialize ModelLoader singleton first
+        self.model_loader = ModelLoader(self.config)
+        
+        # Initialize components with shared model instance
         self.data_loader = DataLoader(self.config)
         self.image_annotator = ImageAnnotator(self.config)
-        self.answer_extractor = AnswerExtractor(self.config)
+        self.answer_extractor = AnswerExtractor(self.config, model_name)
         self.question_generator = QuestionGenerator(self.config, model_name)
         self.self_instruct = SelfInstructGenerator(self.config, model_name)
         self.quality_filter = QualityFilter(self.config)
         
         # Track current model
         self.current_model = model_name
-    
+
     def switch_model(self, model_name: str) -> None:
         """
         Switch to a different LLM model.
@@ -109,7 +114,11 @@ class InstructionDataGenerator:
         if model_name not in self.config["models"]["llm_models"]:
             raise ValueError(f"Model {model_name} not found in configuration")
             
+        # Clear model loader cache first
+        self.model_loader.clear_cache()
+        
         # Update components with new model
+        self.answer_extractor = AnswerExtractor(self.config, model_name)
         self.question_generator = QuestionGenerator(self.config, model_name)
         self.self_instruct = SelfInstructGenerator(self.config, model_name)
         self.current_model = model_name

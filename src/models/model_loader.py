@@ -28,14 +28,27 @@ class ModelLoadError(Exception):
     pass
 
 class ModelLoader:
-    """Handles loading and configuration of different AI models."""
+    """Handles loading and configuration of different AI models with singleton pattern."""
+    
+    _instance = None
+    _models = {}  # Shared model instances
+    
+    def __new__(cls, config: Dict[str, Any]):
+        """Implement singleton pattern."""
+        if cls._instance is None:
+            cls._instance = super(ModelLoader, cls).__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
     
     def __init__(self, config: Dict[str, Any]):
-        """Initialize the model loader."""
+        """Initialize the model loader if not already initialized."""
+        if self._initialized:
+            return
+            
         self.config = self._validate_config(config)
-        self.models_cache = {}
         self.vllm_instances = {}
         self.gpu_allocations = self._initialize_gpu_allocations()
+        self._initialized = True
         
     def _initialize_gpu_allocations(self) -> Dict[str, List[int]]:
         """Initialize GPU allocations for different model types."""
@@ -181,8 +194,8 @@ class ModelLoader:
                 
             cache_key = f"{model_type}_{model_name}" if model_name else model_type
             
-            if cache_key in self.models_cache:
-                return self.models_cache[cache_key]
+            if cache_key in self._models:
+                return self._models[cache_key]
                 
             model_config = self.config["models"].get(model_type)
             if not model_config:
@@ -203,7 +216,7 @@ class ModelLoader:
             # Load model with proper error handling
             try:
                 model = self._load_model(llm_config, model_config.get("parameters", {}))
-                self.models_cache[cache_key] = model
+                self._models[cache_key] = model
                 return model
                 
             except Exception as e:
@@ -299,13 +312,26 @@ class ModelLoader:
             logger.warning(f"bitsandbytes not available, cannot load {model_name} in 8-bit")
             return False
 
+    def get_shared_model(self, task_type: str, model_name: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get a shared model instance for a specific task type, creating it if needed.
+        This ensures model reuse across different components.
+        """
+        cache_key = f"{task_type}_{model_name}" if model_name else task_type
+        
+        if cache_key not in self._models:
+            self._models[cache_key] = self.get_model(task_type, model_name)
+            logger.info(f"Created new shared model instance for {cache_key}")
+        
+        return self._models[cache_key]
+
     def clear_cache(self) -> None:
-        """Clear the model cache and vLLM instances."""
+        """Clear all model caches and instances."""
         try:
-            # Clear regular models
-            self.models_cache.clear()
+            # Clear shared models
+            self._models.clear()
             
-            # Properly clean up vLLM instances
+            # Clear vLLM instances
             for instance in self.vllm_instances.values():
                 try:
                     del instance
@@ -331,7 +357,7 @@ class ModelLoader:
                 "name": model_config["name"],
                 "type": model_config["type"],
                 "parameters": model_config.get("parameters", {}),
-                "loaded": f"{model_name}" in str(self.models_cache.keys()),
+                "loaded": f"{model_name}" in str(self._models.keys()),
                 "gpu_available": HAS_CUDA
             }
             

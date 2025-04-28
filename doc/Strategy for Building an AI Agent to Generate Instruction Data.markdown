@@ -55,27 +55,42 @@ The strategy is divided into key phases:
   - **Document Files (PDF, DOC, PPT)**: Extract all text and images from documents. For images, apply OCR or captioning to ensure all embedded information is captured as text.
   - **Output**: A text dataset comprising original text and captions or OCR results derived from images, ensuring all content from input sources is represented.
 
-### Step 2: Instruction Data Generation
+## Step 2: Instruction Data Generation
 
 - **Objective**: Generate question-answer-instruction triplets from the processed text data.
 - **Key Techniques**:
   - **Two-Stage Method** (Automating Reading Comprehension):
     1. **Answer Extraction**: Identify phrases or text segments that can serve as answers.
-       - **Tools**: Employ Named Entity Recognition (NER) or Pointer Networks to select significant text segments, such as proper nouns, key phrases, or salient information.
-       - **Rationale**: Ensures answers are directly extracted from the input text, avoiding external information.
+       - **Tools**: 
+         - Employ Named Entity Recognition (NER) or Pointer Networks to select significant text segments, such as proper nouns, key phrases, or salient information.
+         - Additionally, use LLMs (e.g., GPT-4o) with prompts to identify key information spans in a context-aware manner. Example prompt: "Given the following text, list the key pieces of information that could be answers to questions about this text."
+         - Enhance selection with few-shot learning (providing examples of extracted answers) or chain-of-thought prompting (reasoning about significance).
+         - Implement a verification step to ensure extracted answers are present in the input text.
+       - **Rationale**: Combines rule-based precision with LLM flexibility, capturing a broader range of answer candidates while adhering to input data constraints.
     2. **Question Generation**: Create questions based on the extracted answers and text context.
-       - **Tools**: Use sequence-to-sequence models like T5 or FLAN-T5, enhanced with linguistic features (POS tags, dependency labels).
-       - **Prompt**: To prevent external information usage, use prompts like: “Generate a question that can only be answered using the following text: \[text segment\].”
-       - **Recommended Model**: GPT-4o for high-quality synthetic data generation, or Phi-3.5-instruct as an open-source alternative.
-    3. **Instruction for Answering**: For each question, generate an instruction or guideline on how to answer it, based on the context. If the question is itself an instruction request, this field can be left blank.
+       - **Tools**: 
+         - Use sequence-to-sequence models like T5 or FLAN-T5, enhanced with linguistic features (POS tags, dependency labels).
+         - Leverage LLMs (e.g., GPT-4o) with diverse prompting strategies to generate varied question types (e.g., factual, inferential, detail-oriented). Examples: "Generate a question about the main idea," "Ask about a specific detail."
+         - Incorporate answer-aware generation: "Given the text and answer '[answer]', generate a question that can be answered with '[answer]'."
+         - Use multi-turn generation (critique and refine questions) or self-instruction (iteratively expand question set).
+         - Ensure input-only basis with constrained prompts and post-generation checks.
+       - **Rationale**: Enhances diversity and relevance, ensuring questions are practical and strictly derived from the input.
+    3. **Instruction for Answering**: For each question, generate an instruction or guideline on how to answer it, based on the context.
+       - **Tools**: Use LLMs (e.g., GPT-4o) with prompts like: "Given the question '[question]' and answer '[answer]', generate an instruction on how to find or derive the answer from the text."
+       - **Example**: Question: "What year was the company founded?" Answer: "1995" Instruction: "Locate the sentence mentioning the company’s founding year."
+       - If the question is an instruction request (e.g., "Summarize the text"), this field can be left blank.
+       - **Rationale**: Provides actionable guidance, enhancing the utility of instruction data for LLM training.
   - **Self-Instruct Method** (Self-Instruct Paper):
     - Create a small seed set of question-answer-instruction triplets from the input data, either manually or automatically (based on syntactic patterns).
     - Use a model like GPT-4o to generate additional triplets based on the seed set, with prompts restricting usage to input data only.
     - **Rationale**: This method allows flexible and efficient scaling of instruction data.
 - **Handling Multimodal Data and Documents**:
-  - For images and image content extracted from documents, use captions or OCR results as text input.
-  - Apply the same question-answer-instruction generation process as for original text.
-  - Example: If a caption is “A cat is sitting on a chair,” a question like “What animal is sitting on the chair?” can be generated with the answer “A cat” and an instruction such as “Identify the animal mentioned in the description.”
+  - For images and image content extracted from documents, use captions or OCR results as text input, integrated with original text.
+  - Apply the same question-answer-instruction generation process, ensuring LLM robustness handles potential noise (e.g., OCR errors).
+  - Example: If a caption is “A cat is sitting on a chair,” a triplet could be:
+    - Question: “What animal is sitting on the chair?”
+    - Answer: “A cat”
+    - Instruction: “Identify the animal mentioned in the description.”
 
 ### Step 3: Quality Assurance and Constraint Compliance
 

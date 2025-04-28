@@ -8,19 +8,32 @@ from collections import defaultdict
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+from ..models.model_loader import ModelLoader
 
 logger = logging.getLogger(__name__)
 
 class AnswerExtractor:
     """Extracts potential answers from text content."""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], model_name: Optional[str] = None):
         self.config = config
         self.extraction_config = config["agent"]["instruction_generation"]["answer_extraction"]
         
         # Initialize models and analyzers
         self._initialize_components()
-    
+        
+        # Get shared LLM instance
+        self.model_loader = ModelLoader(config)
+        if model_name:
+            self.model_name = model_name
+        else:
+            self.model_name = self.config["models"]["llm_models"].get("default", "gpt-4")
+        
+        self.llm = self.model_loader.get_shared_model("answer_extraction", self.model_name)
+        
+        # Load few-shot examples for answer extraction
+        self.few_shot_examples = self._load_few_shot_examples()
+
     def _initialize_components(self):
         """Initialize NLP components and models."""
         try:
@@ -30,11 +43,17 @@ class AnswerExtractor:
             # Add special case patterns for handling structured content markers
             ruler = self.nlp.get_pipe("attribute_ruler")
             patterns = [
-                {"label": "VISUAL_CONTENT", "pattern": [{"TEXT": {"REGEX": r"\[(OCR Text|Image Caption|Detected Objects|Scene Description|Visual Analysis|Visual Context):"}}]},
-                {"label": "CONTENT_MARKER", "pattern": [{"TEXT": {"REGEX": r"===.*==="}}]}
+                {
+                    "patterns": [[{"TEXT": {"REGEX": r"\[(OCR Text|Image Caption|Detected Objects|Scene Description|Visual Analysis|Visual Context):"}}]], 
+                    "attrs": {"ENT_TYPE": "VISUAL_CONTENT"}
+                },
+                {
+                    "patterns": [[{"TEXT": {"REGEX": r"===.*==="}}]], 
+                    "attrs": {"ENT_TYPE": "CONTENT_MARKER"}
+                }
             ]
             for pattern in patterns:
-                ruler.add([[pattern]])
+                ruler.add(pattern["patterns"], pattern["attrs"])
                 
             # Initialize semantic search model for content similarity
             self.sim_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
@@ -43,51 +62,177 @@ class AnswerExtractor:
             logger.error(f"Failed to initialize NLP components: {e}")
             raise
     
-    def extract_answers(self, content: str) -> List[Dict[str, Any]]:
-        """
-        Extract potential answers from unified content.
-        
-        Args:
-            content: Text content including both document text and image-derived information
+    def _load_few_shot_examples(self) -> str:
+        """Load few-shot examples for answer extraction."""
+        examples = """Text: The Tesla Model S was first introduced in 2012. It has a range of up to 405 miles and can accelerate from 0-60 mph in 2.3 seconds.
+Answers:
+1. 2012 (Year of Tesla Model S introduction)
+2. 405 miles (Range of Tesla Model S)
+3. 2.3 seconds (0-60 mph acceleration time)
+
+Text: Python was created by Guido van Rossum and released in 1991. It emphasizes code readability with its notable use of significant indentation.
+Answers:
+1. Guido van Rossum (Creator of Python)
+2. 1991 (Release year)
+3. code readability (Key emphasis of Python)
+4. significant indentation (Notable feature)
+
+This shows how to identify key pieces of information that could serve as answers."""
+        return examples
+
+    def _extract_llm_answers(self, text: str) -> List[Dict[str, Any]]:
+        """Extract answers using LLM with chain-of-thought prompting."""
+        try:
+            # Prepare prompt with few-shot examples and chain-of-thought
+            prompt = f"""You are an expert at identifying key information in text that could serve as answers to questions.
             
-        Returns:
-            List of extracted answer candidates with metadata
-        """
-        answers = []
+{self.few_shot_examples}
+
+Now, analyze this text and identify key pieces of information that could serve as answers.
+Use chain-of-thought reasoning to explain why each piece of information is important.
+
+Text: {text}
+
+Think through the following steps:
+1. Identify factual information (dates, numbers, names, etc.)
+2. Look for key concepts and definitions
+3. Consider important relationships or cause-effect pairs
+4. Note any significant descriptions or characteristics
+
+Then list the answers in this format:
+Answer: [piece of information]
+Reasoning: [why this is important information]
+Confidence: [score between 0-1]
+Type: [entity/fact/description]
+
+Begin your analysis:"""
+
+            # Get LLM response
+            model_dict = self.llm
+            if "vllm" in str(type(model_dict["model"])):
+                response = self._get_vllm_response(model_dict["model"], prompt)
+            else:
+                response = model_dict["model"](prompt)
+
+            # Parse LLM output into answer dictionaries
+            answers = []
+            current_answer = {}
+            
+            for line in response.split('\n'):
+                line = line.strip()
+                if not line:
+                    if current_answer.get('text'):
+                        answers.append(current_answer.copy())
+                        current_answer = {}
+                    continue
+                    
+                if line.startswith('Answer:'):
+                    if current_answer.get('text'):
+                        answers.append(current_answer.copy())
+                    current_answer = {
+                        'text': line[7:].strip(),
+                        'source': 'llm',
+                        'context': text
+                    }
+                elif line.startswith('Reasoning:'):
+                    current_answer['reasoning'] = line[10:].strip()
+                elif line.startswith('Confidence:'):
+                    try:
+                        current_answer['score'] = float(line[11:].strip())
+                    except:
+                        current_answer['score'] = 0.8
+                elif line.startswith('Type:'):
+                    current_answer['type'] = line[5:].strip().lower()
+                    current_answer['subtype'] = current_answer['type']
+
+            # Add final answer if exists
+            if current_answer.get('text'):
+                answers.append(current_answer)
+
+            # Verify answers are present in text
+            verified_answers = []
+            for answer in answers:
+                if self._verify_answer_in_text(answer['text'], text):
+                    verified_answers.append(answer)
+                else:
+                    logger.warning(f"Answer '{answer['text']}' not found in source text - discarding")
+
+            return verified_answers
+
+        except Exception as e:
+            logger.error(f"Error in LLM answer extraction: {e}")
+            return []
+
+    def _verify_answer_in_text(self, answer: str, text: str) -> bool:
+        """Verify that an answer is present in the source text."""
+        # Clean and normalize text for comparison
+        def normalize_text(t):
+            return re.sub(r'\s+', ' ', t.lower().strip())
+        
+        norm_answer = normalize_text(answer)
+        norm_text = normalize_text(text)
+        
+        # Direct match
+        if norm_answer in norm_text:
+            return True
+            
+        # Check for semantic similarity using sentence embeddings
+        answer_embedding = self.sim_model.encode([norm_answer])[0]
+        
+        # Split text into chunks around the same length as the answer
+        words = norm_text.split()
+        chunk_size = len(norm_answer.split())
+        
+        for i in range(len(words) - chunk_size + 1):
+            chunk = " ".join(words[i:i+chunk_size])
+            chunk_embedding = self.sim_model.encode([chunk])[0]
+            
+            similarity = cosine_similarity(
+                answer_embedding.reshape(1, -1),
+                chunk_embedding.reshape(1, -1)
+            )[0][0]
+            
+            if similarity > 0.8:  # High semantic similarity threshold
+                return True
+                
+        return False
+
+    def extract_answers(self, content: str) -> List[Dict[str, Any]]:
+        """Extract potential answers from unified content using multiple methods."""
+        all_answers = []
         
         try:
-            # Split content into sections based on visual content markers
-            sections = self._split_content_sections(content)
+            # Get traditional NER/rule-based answers
+            traditional_answers = self._extract_text_answers(content)
+            all_answers.extend(traditional_answers)
             
-            for section in sections:
-                section_type = section["type"]
-                section_text = section["text"]
-                
-                if section_type == "text":
-                    # Process regular text content
-                    text_answers = self._extract_text_answers(section_text)
-                    answers.extend(text_answers)
-                    
-                elif section_type == "visual":
-                    # Process visual content sections
-                    visual_answers = self._extract_visual_answers(section_text)
-                    answers.extend(visual_answers)
-                    
-                elif section_type == "combined":
-                    # Process sections with both text and visual content
-                    combined_answers = self._extract_combined_answers(section_text)
-                    answers.extend(combined_answers)
+            # Get LLM-generated answers
+            llm_answers = self._extract_llm_answers(content)
+            all_answers.extend(llm_answers)
             
-            # Filter and rank answers
-            answers = self._filter_answers(answers)
-            answers = self._rank_answers(answers)
+            # Process any visual content sections
+            visual_answers = self._extract_visual_answers(content)
+            all_answers.extend(visual_answers)
             
-            return answers[:self.extraction_config["max_answers"]]
+            # Process combined content sections
+            combined_answers = self._extract_combined_answers(content)
+            all_answers.extend(combined_answers)
+            
+            # Filter and rank all answers
+            filtered_answers = self._filter_answers(all_answers)
+            ranked_answers = self._rank_answers(filtered_answers)
+            
+            return ranked_answers[:self.extraction_config["max_answers"]]
             
         except Exception as e:
-            logger.error(f"Answer extraction failed: {e}")
+            logger.error(f"Error in answer extraction: {e}")
             return []
-    
+
+    def _get_vllm_response(self, model: Any, prompt: str) -> str:
+        """Get response from vLLM model."""
+        outputs = model.generate([prompt], sampling_params=self.llm["sampling_params"])
+        return outputs[0].outputs[0].text if outputs else ""
+
     def _split_content_sections(self, content: str) -> List[Dict[str, Any]]:
         """Split content into sections based on content type."""
         sections = []
