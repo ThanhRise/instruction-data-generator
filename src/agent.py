@@ -20,13 +20,11 @@ from .quality_control.quality_filter import QualityFilter
 from .utils.helpers import (
     _validate_agent_config,
     _validate_model_config,
-    load_env_config,
     load_yaml_config,
     setup_logging,
     ModelMetricsLogger,
     timed_execution,
     estimate_tokens,
-    merge_configs,
     validate_config
 )
 
@@ -201,13 +199,6 @@ class InstructionDataGenerator:
             logger.error(f"Error generating instruction data: {e}")
             raise
 
-    def _load_config(self, *config_paths: Union[str, Path], env_file: Optional[Path] = None) -> Dict[str, Any]:
-        """Load and merge configuration from YAML files and environment variables."""
-        try:
-            return merge_configs(*config_paths, env_file=env_file)
-        except Exception as e:
-            logger.error(f"Error loading configuration: {e}")
-            raise
     
     def _process_unified_content(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Process unified document content to generate QA pairs."""

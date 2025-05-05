@@ -29,14 +29,15 @@ models:
         top_p: 0.95
         max_new_tokens: 150
 
-    qwen_14b:
-      name: "Qwen/Qwen-14B-Chat"
+    qwen25_32b:
+      name: "Qwen/Qwen2.5-32B-Instruct"
       type: "vllm"
-      model_path: "models/qwen-14b"
+      model_path: "Qwen/Qwen2.5-32B-Instruct"
       parameters:
         temperature: 0.8
         top_p: 0.95
         max_new_tokens: 150
+        tensor_parallel_size: 4
 
     phi35:
       name: "microsoft/phi-3.5"
@@ -47,9 +48,9 @@ models:
         max_new_tokens: 150
 
     llama3_70b:
-      name: "meta-llama/Llama-3.3-70b-chat-hf"
+      name: "meta-llama/Llama-3.3-70B-Instruct"
       type: "vllm"
-      model_path: "meta-llama/Llama-3.3-70b-chat-hf"
+      model_path: "meta-llama/Llama-3.3-70B-Instruct"
       parameters:
         temperature: 0.8
         top_p: 0.95
@@ -57,9 +58,9 @@ models:
         tensor_parallel_size: 6
 
     qwen25_72b:
-      name: "Qwen/Qwen-2.5-72B-Chat"
+      name: "Qwen/Qwen-2.5-72B-Instruct"
       type: "vllm"
-      model_path: "Qwen/Qwen-2.5-72B-Chat"
+      model_path: "Qwen/Qwen-2.5-72B-Instruct"
       parameters:
         temperature: 0.8
         top_p: 0.95
@@ -67,9 +68,9 @@ models:
         tensor_parallel_size: 6
 
     qwen2_70b:
-      name: "Qwen/Qwen-2-70B-Chat"
+      name: "Qwen/Qwen-2-70B-Instruct"
       type: "vllm"
-      model_path: "Qwen/Qwen-2-70B-Chat"
+      model_path: "Qwen/Qwen-2-70B-Instruct"
       parameters:
         temperature: 0.8
         top_p: 0.95
@@ -79,13 +80,13 @@ models:
   # Model serving configuration
   serving:
     vllm:
-      tensor_parallel_size: 6  # Updated for larger models
+      tensor_parallel_size: 4  # Updated for larger models
       gpu_memory_utilization: 0.85  # Slightly reduced to prevent OOM
-      max_num_batched_tokens: 4096
+      max_num_batched_tokens: 8192
       trust_remote_code: true
       dtype: "float16"
       quantization:
-        enabled: true
+        enabled: false
         bits: 4
         group_size: 128
         use_double_quant: true  # Enable double quantization for memory efficiency

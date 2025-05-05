@@ -335,7 +335,7 @@ class ModelLoader:
             
             # Initialize the model based on its type
             if model_config["type"] == "vllm":
-                self._shared_llm = self._load_vllm_model(model_config)
+                self._shared_llm = self._load_vllm_model(model_config, {})  # Pass empty dict as task_params
             elif model_config["type"] == "transformers":
                 self._shared_llm = self._load_transformers_model(model_config["name"])
             elif model_config["type"] == "api":
@@ -447,7 +447,7 @@ class ModelLoader:
                 model=model_path,
                 tensor_parallel_size=tensor_parallel_size,
                 gpu_memory_utilization=vllm_config["gpu_memory_utilization"],
-                max_num_batched_tokens=vllm_config.get("max_num_batched_tokens", 4096),
+                max_num_batched_tokens=vllm_config.get("max_num_batched_tokens", 8192),
                 trust_remote_code=vllm_config.get("trust_remote_code", True),
                 dtype=vllm_config["dtype"],
                 quantization=quantization_config,
