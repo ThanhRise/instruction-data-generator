@@ -204,6 +204,14 @@ class InstructionDataGenerator:
         """Process unified document content to generate QA pairs."""
         qa_pairs = []
         contexts = {}
+        log_data = {
+            "raw_documents": documents,
+            "extracted_answers": {},
+            "initial_qa_pairs": [],
+            "augmented_pairs": [],
+            "filtered_pairs": [],
+            "validated_pairs": []
+        }
         
         try:
             # Extract answers from unified content
@@ -214,6 +222,7 @@ class InstructionDataGenerator:
                 
                 # Extract potential answers from unified content
                 extracted_answers = self.answer_extractor.extract_answers(content)
+                log_data["extracted_answers"][source] = extracted_answers
                 
                 # Generate questions for extracted answers
                 initial_pairs = self.question_generator.generate_questions({
@@ -223,6 +232,7 @@ class InstructionDataGenerator:
                 })
                 
                 qa_pairs.extend(initial_pairs)
+                log_data["initial_qa_pairs"].extend(initial_pairs)
             
             # Generate additional pairs using self-instruction
             augmented_pairs = []
@@ -237,10 +247,19 @@ class InstructionDataGenerator:
                     augmented_pairs.extend(additional_pairs)
             
             qa_pairs.extend(augmented_pairs)
+            log_data["augmented_pairs"] = augmented_pairs
             
             # Filter and validate pairs
             filtered_pairs = self.quality_filter.filter_qa_pairs(qa_pairs, contexts)
+            log_data["filtered_pairs"] = filtered_pairs
+            
             validated_pairs = self.quality_filter.validate_against_source(filtered_pairs, contexts)
+            log_data["validated_pairs"] = validated_pairs
+            
+            # Log all intermediate data
+            log_file = Path(logger.handlers[0].baseFilename).parent / "intermediate_processing.json"
+            with open(log_file, 'w') as f:
+                json.dump(log_data, f, indent=2)
             
             return validated_pairs
             

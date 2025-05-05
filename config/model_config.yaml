@@ -81,7 +81,7 @@ models:
   serving:
     vllm:
       tensor_parallel_size: 4  # Updated for larger models
-      gpu_memory_utilization: 0.85  # Slightly reduced to prevent OOM
+      gpu_memory_utilization: 0.99  # Slightly reduced to prevent OOM
       max_num_batched_tokens: 8192
       trust_remote_code: true
       dtype: "float16"

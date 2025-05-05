@@ -43,10 +43,10 @@ class QuestionGenerator:
             if self.gen_config.get("use_question_classifier", True):
                 from transformers import AutoModelForSequenceClassification, AutoTokenizer
                 self.q_classifier = AutoModelForSequenceClassification.from_pretrained(
-                    "mrm8488/bert-mini-finetuned-question-classification"
+                    "carrassi-ni/bert-base-trec-question-classification"
                 )
                 self.q_tokenizer = AutoTokenizer.from_pretrained(
-                    "mrm8488/bert-mini-finetuned-question-classification"
+                    "carrassi-ni/bert-base-trec-question-classification"
                 )
                 
         except Exception as e:

@@ -86,7 +86,7 @@ def main():
             "qwen25_72b",
             "qwen2_70b",
             "llama2_13b",
-            "qwen_14b",
+            "qwen25_32b",
             "phi35"
         ],
         help="Model name from config"

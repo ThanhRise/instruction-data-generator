@@ -6,7 +6,7 @@ import json
 from PIL import Image
 import pytesseract
 import docx
-import pdfplumber
+import fitz  # PyMuPDF
 from pptx import Presentation
 import openpyxl
 import markdown
@@ -398,51 +398,82 @@ class DocumentProcessor:
                 }
     
     def _process_pdf(self, file_path: Path) -> Dict[str, Any]:
-        """Process PDF documents."""
+        """Process PDF documents with enhanced extraction using PyMuPDF."""
         text_content = []
         images = []
         relationships = []
         
-        # Extract text using pdfplumber
-        with pdfplumber.open(file_path) as pdf:
-            for page_num, page in enumerate(pdf.pages):
-                # Extract text
-                page_text = page.extract_text()
-                if page_text:
-                    text_content.append(page_text)
+        try:
+            # Open PDF with PyMuPDF
+            with fitz.open(file_path) as pdf:
+                for page_num, page in enumerate(pdf):
+                    # Extract text with improved formatting preservation
+                    blocks = page.get_text("dict")["blocks"]
+                    page_text = []
                     
-                # Extract images if enabled
-                if self.doc_config["pdf_settings"]["extract_images"]:
-                    # Convert page to image
-                    page_images = convert_from_path(
-                        file_path,
-                        first_page=page_num + 1,
-                        last_page=page_num + 1,
-                        dpi=self.doc_config["pdf_settings"]["dpi"]
-                    )
+                    for block in blocks:
+                        if block["type"] == 0:  # Text block
+                            for line in block["lines"]:
+                                line_text = " ".join(span["text"] for span in line["spans"])
+                                if line_text.strip():
+                                    page_text.append(line_text)
                     
-                    for img_num, img in enumerate(page_images):
-                        img_id = f"page_{page_num}_img_{img_num}"
-                        images.append({
-                            "id": img_id,
-                            "image": img,
-                            "page": page_num
-                        })
-                        relationships.append({
-                            "type": "page_content",
-                            "source": f"page_{page_num}",
-                            "target": img_id
-                        })
+                    if page_text:
+                        text_content.append("\n".join(page_text))
+                    
+                    # Extract images if enabled
+                    if self.doc_config["pdf_settings"]["extract_images"]:
+                        # Get list of images on the page
+                        image_list = page.get_images()
                         
-                    # Use OCR if enabled and text extraction failed
-                    if not page_text and self.doc_config["pdf_settings"]["use_ocr_fallback"]:
-                        for img in page_images:
+                        for img_index, img_info in enumerate(image_list):
+                            try:
+                                # Get image data
+                                xref = img_info[0]
+                                base_image = pdf.extract_image(xref)
+                                
+                                if base_image:
+                                    # Convert to PIL Image
+                                    image_data = base_image["image"]
+                                    image = Image.open(io.BytesIO(image_data))
+                                    
+                                    img_id = f"page_{page_num}_img_{img_index}"
+                                    images.append({
+                                        "id": img_id,
+                                        "image": image,
+                                        "page": page_num,
+                                        "location": {
+                                            "x": img_info[1],  # x coordinate
+                                            "y": img_info[2],  # y coordinate
+                                            "width": img_info[3],  # width
+                                            "height": img_info[4]  # height
+                                        }
+                                    })
+                                    
+                                    relationships.append({
+                                        "type": "page_content",
+                                        "source": f"page_{page_num}",
+                                        "target": img_id,
+                                        "position": "at_location"
+                                    })
+                            except Exception as e:
+                                logger.warning(f"Failed to extract image {img_index} from page {page_num}: {e}")
+                        
+                        # If text extraction failed, try OCR on the page
+                        if not page_text and self.doc_config["pdf_settings"]["use_ocr_fallback"]:
+                            # Convert page to image for OCR
+                            pix = page.get_pixmap()
+                            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                             ocr_text = self._perform_ocr(img)
                             if ocr_text:
                                 text_content.append(ocr_text)
         
+        except Exception as e:
+            logger.error(f"Error processing PDF {file_path}: {e}")
+            raise
+        
         return {
-            "text": "\n".join(text_content),
+            "text": "\n\n".join(text_content),
             "images": images,
             "relationships": relationships
         }

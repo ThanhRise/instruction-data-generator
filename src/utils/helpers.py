@@ -331,13 +331,30 @@ def _validate_model_config(model_config: Dict[str, Any]) -> bool:
     return True
 
 class ModelMetricsLogger:
-    """Tracks and logs model performance metrics."""
-    
     def __init__(self, log_dir: Optional[str] = None):
         self.log_dir = Path(log_dir) if log_dir else Path("logs")
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.metrics = {}
-    
+        self.performance_log = self.log_dir / "model_performance.json"
+        self.gpu_log = self.log_dir / "gpu_metrics.json"
+        self._initialize_logs()
+
+    def _initialize_logs(self):
+        """Initialize or load existing log files."""
+        if not self.performance_log.exists():
+            self._save_json(self.performance_log, {})
+        if not self.gpu_log.exists():
+            self._save_json(self.gpu_log, {})
+
+    def _save_json(self, path: Path, data: Dict):
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    def _load_json(self, path: Path) -> Dict:
+        if path.exists():
+            with open(path, 'r') as f:
+                return json.load(f)
+        return {}
+
     def log_model_usage(
         self,
         model_name: str,
@@ -347,83 +364,55 @@ class ModelMetricsLogger:
         output_tokens: int,
         success: bool,
         error: Optional[str] = None
-    ) -> None:
-        """Log a model usage event."""
-        if model_name not in self.metrics:
-            self.metrics[model_name] = {
-                "total_calls": 0,
-                "successful_calls": 0,
-                "failed_calls": 0,
-                "total_duration": 0.0,
-                "avg_duration": 0.0,
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
-                "tasks": {},
-                "errors": []
-            }
+    ):
+        """Log detailed model usage metrics."""
+        metrics = self._load_json(self.performance_log)
         
-        model_metrics = self.metrics[model_name]
-        model_metrics["total_calls"] += 1
-        model_metrics["successful_calls" if success else "failed_calls"] += 1
-        model_metrics["total_duration"] += duration
-        model_metrics["avg_duration"] = (
-            model_metrics["total_duration"] / model_metrics["total_calls"]
-        )
-        model_metrics["total_input_tokens"] += input_tokens
-        model_metrics["total_output_tokens"] += output_tokens
-        
-        if task_type not in model_metrics["tasks"]:
-            model_metrics["tasks"][task_type] = {
-                "calls": 0,
-                "successes": 0,
-                "failures": 0,
-                "total_duration": 0.0
-            }
-        
-        task_metrics = model_metrics["tasks"][task_type]
-        task_metrics["calls"] += 1
-        task_metrics["successes" if success else "failures"] += 1
-        task_metrics["total_duration"] += duration
-        
-        if not success and error:
-            model_metrics["errors"].append({
-                "timestamp": time.time(),
-                "task_type": task_type,
-                "error": error
-            })
-        
-        # Save metrics to file
-        self._save_metrics()
-    
-    def log_gpu_stats(self, model_name: str) -> None:
-        """Log GPU statistics for a model."""
-        if not torch:
-            return
+        if model_name not in metrics:
+            metrics[model_name] = {"tasks": {}}
             
-        if not torch.cuda.is_available():
-            return
-        
-        gpu_stats = {
-            "memory_allocated": torch.cuda.memory_allocated(),
-            "memory_reserved": torch.cuda.memory_reserved(),
-            "max_memory_allocated": torch.cuda.max_memory_allocated()
+        if task_type not in metrics[model_name]["tasks"]:
+            metrics[model_name]["tasks"][task_type] = []
+            
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "duration": duration,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "success": success
         }
         
-        if model_name not in self.metrics:
-            self.metrics[model_name] = {}
-        
-        self.metrics[model_name]["gpu_stats"] = gpu_stats
-        self._save_metrics()
-    
-    def get_model_performance(self, model_name: str) -> Dict[str, Any]:
-        """Get performance metrics for a specific model."""
-        return self.metrics.get(model_name, {})
-    
-    def _save_metrics(self) -> None:
-        """Save metrics to a JSON file."""
-        metrics_file = self.log_dir / "model_metrics.json"
-        with open(metrics_file, "w") as f:
-            json.dump(self.metrics, f, indent=2)
+        if error:
+            log_entry["error"] = error
+            
+        metrics[model_name]["tasks"][task_type].append(log_entry)
+        self._save_json(self.performance_log, metrics)
+
+    def log_gpu_stats(self, model_name: str):
+        """Log GPU usage statistics if available."""
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return
+                
+            stats = self._load_json(self.gpu_log)
+            if model_name not in stats:
+                stats[model_name] = []
+                
+            current_stats = {
+                "timestamp": datetime.now().isoformat(),
+                "memory_allocated": torch.cuda.memory_allocated(),
+                "memory_reserved": torch.cuda.memory_reserved(),
+                "max_memory_allocated": torch.cuda.max_memory_allocated()
+            }
+            
+            stats[model_name].append(current_stats)
+            self._save_json(self.gpu_log, stats)
+            
+        except ImportError:
+            logger.warning("PyTorch not available for GPU logging")
+        except Exception as e:
+            logger.error(f"Error logging GPU stats: {e}")
 
 def timed_execution(func: Callable) -> Callable:
     """Decorator to time function execution."""
