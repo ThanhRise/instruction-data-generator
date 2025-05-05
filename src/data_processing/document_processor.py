@@ -15,7 +15,9 @@ from pdf2image import convert_from_path
 import cv2
 import numpy as np
 import io
-from .image_annotator import ImageAnnotator  # Add this import
+import uuid
+from datetime import datetime
+from .image_annotator import ImageAnnotator
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,20 @@ class DocumentProcessor:
         self._configure_ocr()
         if self.doc_config.get("use_image_captioning", False):
             self._initialize_image_captioner()
-    
+        
+        # Initialize output directories
+        self.base_dir = Path(config["paths"]["base_dir"])
+        self.image_output_dir = self.base_dir / "data" / "processed" / "extracted_images"
+        self.image_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create subdirectories for different sources
+        (self.image_output_dir / "pdf").mkdir(exist_ok=True)
+        (self.image_output_dir / "docx").mkdir(exist_ok=True)
+        (self.image_output_dir / "pptx").mkdir(exist_ok=True)
+        
+        # Initialize image metadata tracking
+        self.image_metadata = {}
+
     def _configure_ocr(self) -> None:
         """Configure OCR settings."""
         ocr_config = self.doc_config.get("ocr_config", {})
@@ -60,6 +75,63 @@ class DocumentProcessor:
             logger.error(f"Failed to initialize image captioner: {e}")
             self.image_captioner = None
     
+    def _save_image(self, image: Union[Image.Image, bytes], source_path: Path, location_info: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Save extracted image and return its metadata."""
+        try:
+            # Convert bytes to PIL Image if needed
+            if isinstance(image, bytes):
+                image = Image.open(io.BytesIO(image))
+            
+            # Generate unique image ID and filename
+            image_id = str(uuid.uuid4())
+            source_type = source_path.suffix.lower()[1:]
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{source_path.stem}_{timestamp}_{image_id}.png"
+            
+            # Determine output directory based on source type
+            output_dir = self.image_output_dir / source_type
+            output_path = output_dir / filename
+            
+            # Save image
+            image.save(output_path, "PNG")
+            
+            # Create metadata
+            metadata = {
+                "id": image_id,
+                "source_document": str(source_path),
+                "source_type": source_type,
+                "filename": filename,
+                "path": str(output_path),
+                "size": image.size,
+                "format": image.format,
+                "extracted_timestamp": timestamp
+            }
+            
+            # Add location info if available
+            if location_info:
+                metadata["location"] = location_info
+            
+            # Store metadata
+            self.image_metadata[image_id] = metadata
+            
+            # Save metadata to file
+            self._save_metadata()
+            
+            return metadata
+            
+        except Exception as e:
+            logger.error(f"Error saving image from {source_path}: {e}")
+            return {}
+
+    def _save_metadata(self) -> None:
+        """Save image metadata to JSON file."""
+        try:
+            metadata_file = self.image_output_dir / "image_metadata.json"
+            with open(metadata_file, 'w') as f:
+                json.dump(self.image_metadata, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving image metadata: {e}")
+
     def _process_image_content(self, image: Image.Image) -> str:
         """Process image using OCR and/or captioning."""
         extracted_text = []
@@ -366,16 +438,28 @@ class DocumentProcessor:
                             image_id = image_data.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
                             if image_id:
                                 image_path = f"word/media/{image_id}"
-                                images.append({
-                                    "id": image_id,
-                                    "path": image_path,
+                                image_bytes = doc.part.related_parts[image_id].blob
+                                
+                                # Save image and get metadata
+                                location_info = {
                                     "paragraph_index": i
-                                })
-                                relationships.append({
-                                    "type": "embedded_content",
-                                    "source": f"paragraph_{i}",
-                                    "target": image_id
-                                })
+                                }
+                                
+                                image_meta = self._save_image(image_bytes, file_path, location_info)
+                                
+                                if image_meta:
+                                    images.append({
+                                        "id": image_meta["id"],
+                                        "image": Image.open(io.BytesIO(image_bytes)),
+                                        "metadata": image_meta
+                                    })
+                                    
+                                    relationships.append({
+                                        "type": "embedded_content",
+                                        "source": f"paragraph_{i}",
+                                        "target": image_meta["id"]
+                                    })
+                                    
                         except Exception as e:
                             logger.warning(f"Failed to extract image from paragraph {i}: {e}")
             
@@ -437,25 +521,30 @@ class DocumentProcessor:
                                     image_data = base_image["image"]
                                     image = Image.open(io.BytesIO(image_data))
                                     
-                                    img_id = f"page_{page_num}_img_{img_index}"
-                                    images.append({
-                                        "id": img_id,
-                                        "image": image,
+                                    # Save image and get metadata
+                                    location_info = {
                                         "page": page_num,
-                                        "location": {
-                                            "x": img_info[1],  # x coordinate
-                                            "y": img_info[2],  # y coordinate
-                                            "width": img_info[3],  # width
-                                            "height": img_info[4]  # height
-                                        }
-                                    })
+                                        "x": img_info[1],  # x coordinate
+                                        "y": img_info[2],  # y coordinate
+                                        "width": img_info[3],  # width
+                                        "height": img_info[4]  # height
+                                    }
                                     
-                                    relationships.append({
-                                        "type": "page_content",
-                                        "source": f"page_{page_num}",
-                                        "target": img_id,
-                                        "position": "at_location"
-                                    })
+                                    image_meta = self._save_image(image, file_path, location_info)
+                                    
+                                    if image_meta:
+                                        images.append({
+                                            "id": image_meta["id"],
+                                            "image": image,
+                                            "metadata": image_meta
+                                        })
+                                        
+                                        relationships.append({
+                                            "type": "page_content",
+                                            "source": f"page_{page_num}",
+                                            "target": image_meta["id"],
+                                            "position": "at_location"
+                                        })
                             except Exception as e:
                                 logger.warning(f"Failed to extract image {img_index} from page {page_num}: {e}")
                         
@@ -496,18 +585,28 @@ class DocumentProcessor:
                 # Extract images
                 if shape.shape_type == 13:  # MSO_SHAPE_TYPE.PICTURE
                     try:
-                        image = shape.image
-                        img_id = f"slide_{slide_num}_img_{len(images)}"
-                        images.append({
-                            "id": img_id,
-                            "image": image,
+                        image_bytes = shape.image.blob
+                        
+                        # Save image and get metadata
+                        location_info = {
                             "slide": slide_num
-                        })
-                        relationships.append({
-                            "type": "slide_content",
-                            "source": f"slide_{slide_num}",
-                            "target": img_id
-                        })
+                        }
+                        
+                        image_meta = self._save_image(image_bytes, file_path, location_info)
+                        
+                        if image_meta:
+                            images.append({
+                                "id": image_meta["id"],
+                                "image": Image.open(io.BytesIO(image_bytes)),
+                                "metadata": image_meta
+                            })
+                            
+                            relationships.append({
+                                "type": "slide_content",
+                                "source": f"slide_{slide_num}",
+                                "target": image_meta["id"]
+                            })
+                            
                     except Exception as e:
                         logger.warning(f"Failed to extract image from slide {slide_num}: {e}")
             

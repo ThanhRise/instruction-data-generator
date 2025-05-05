@@ -152,6 +152,30 @@ class ImageAnnotator:
         
         return results
 
+    def process_image(self, image: "Image.Image") -> Dict[str, Any]:
+        """
+        Process a single image and return extracted information.
+        
+        Args:
+            image: PIL Image to process
+            
+        Returns:
+            Dictionary containing extracted information
+        """
+        # Process the single image as a batch of one
+        results = self.process_batch([image])
+        
+        # Return the first (and only) result
+        return results[0] if results else {
+            "ocr_text": "",
+            "caption": "",
+            "context": {
+                "objects": [],
+                "scene_description": "",
+                "visual_qa": []
+            }
+        }
+
     def _batch_extract_text(self, images: List[Image.Image]) -> List[str]:
         """Extract text from a batch of images using OCR."""
         results = []
