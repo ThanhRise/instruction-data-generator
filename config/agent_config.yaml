@@ -157,6 +157,45 @@ agent:
       extract_images: true
       use_ocr_fallback: true
       dpi: 300
+      layout_analysis_flags: 11  # Enable all PyMuPDF layout analysis features
+      
+      # Enhanced text extraction settings
+      text_extraction:
+        preserve_formatting: true
+        detect_headings: true
+        detect_lists: true
+        detect_tables: true
+        heading_size_threshold: 14
+        heading_bold_threshold: 3
+        table_confidence: 0.8
+        
+      # Enhanced image filtering settings
+      image_filtering:
+        min_size: [100, 100]  # Minimum dimensions to filter out icons
+        min_complexity: 0.01  # Minimum edge detection complexity
+        min_colors: 5  # Minimum unique colors
+        min_area_ratio: 0.01  # Minimum page area ratio
+        skip_top_area: 0.1  # Skip images in top 10% (often headers)
+        skip_bottom_area: 0.1  # Skip images in bottom 10% (often footers)
+        
+      # Image quality enhancement
+      image_enhancement:
+        enable_adaptive_threshold: true
+        denoise: true
+        auto_deskew: true
+        threshold_block_size: 11
+        threshold_c: 2
+      
+      # OCR settings
+      ocr_config:
+        language: "eng"
+        psm: 3  # Page segmentation mode: 3 = auto
+        oem: 3  # OCR Engine mode: 3 = default
+        preprocessing:
+          - deskew
+          - denoise
+          - enhance_contrast
+        confidence_threshold: 60  # Minimum confidence score for OCR text
       
     image_settings:
       min_size: [32, 32]

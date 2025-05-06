@@ -303,7 +303,7 @@ class DocumentProcessor:
                 # Create relationship with enhanced context
                 relationship = {
                     "type": "embedded_content",
-                    "source": f"paragraph_{img_data.get('paragraph_index', img_idx)}",
+                    "source": f"paragraph_{img_data.get("paragraph_index", img_idx)}",
                     "target": f"img_{img_idx}",
                     "context": self._generate_image_context(result)
                 }
@@ -491,72 +491,68 @@ class DocumentProcessor:
             # Open PDF with PyMuPDF
             with fitz.open(file_path) as pdf:
                 for page_num, page in enumerate(pdf):
-                    # Extract text with improved formatting preservation
-                    blocks = page.get_text("dict")["blocks"]
+                    # Get page rotation and handle different orientations
+                    rotation = page.rotation
+                    if rotation != 0:
+                        page.set_rotation(0)
+                    
+                    # Extract text with detailed layout analysis
+                    layout = page.get_text("dict", sort=True, flags=11)  # Use all layout analysis flags
                     page_text = []
                     
-                    for block in blocks:
+                    # Process blocks with layout awareness
+                    for block in layout["blocks"]:
                         if block["type"] == 0:  # Text block
+                            block_text = []
                             for line in block["lines"]:
-                                line_text = " ".join(span["text"] for span in line["spans"])
+                                # Get text with font info
+                                spans = []
+                                for span in line["spans"]:
+                                    spans.append({
+                                        "text": span["text"],
+                                        "font": span["font"],
+                                        "size": span["size"],
+                                        "flags": span["flags"]  # Bold, italic etc
+                                    })
+                                
+                                # Preserve formatting for structured content
+                                line_text = ""
+                                current_format = None
+                                for span in spans:
+                                    if self._is_heading(span):
+                                        line_text += f"\n## {span['text']} ##\n"
+                                    elif self._is_list_item(span):
+                                        line_text += f"\n• {span['text']}"
+                                    else:
+                                        line_text += span["text"]
+                                
                                 if line_text.strip():
-                                    page_text.append(line_text)
+                                    block_text.append(line_text)
+                            
+                            # Handle tables
+                            if self._is_table_block(block):
+                                table_text = self._extract_table_content(block)
+                                if table_text:
+                                    block_text.append(table_text)
+                            
+                            if block_text:
+                                page_text.append(" ".join(block_text))
                     
                     if page_text:
                         text_content.append("\n".join(page_text))
                     
                     # Extract images if enabled
                     if self.doc_config["pdf_settings"]["extract_images"]:
-                        # Get list of images on the page
-                        image_list = page.get_images()
+                        self._extract_pdf_images(page, page_num, pdf, images, relationships)
                         
-                        for img_index, img_info in enumerate(image_list):
-                            try:
-                                # Get image data
-                                xref = img_info[0]
-                                base_image = pdf.extract_image(xref)
-                                
-                                if base_image:
-                                    # Convert to PIL Image
-                                    image_data = base_image["image"]
-                                    image = Image.open(io.BytesIO(image_data))
-                                    
-                                    # Save image and get metadata
-                                    location_info = {
-                                        "page": page_num,
-                                        "x": img_info[1],  # x coordinate
-                                        "y": img_info[2],  # y coordinate
-                                        "width": img_info[3],  # width
-                                        "height": img_info[4]  # height
-                                    }
-                                    
-                                    image_meta = self._save_image(image, file_path, location_info)
-                                    
-                                    if image_meta:
-                                        images.append({
-                                            "id": image_meta["id"],
-                                            "image": image,
-                                            "metadata": image_meta
-                                        })
-                                        
-                                        relationships.append({
-                                            "type": "page_content",
-                                            "source": f"page_{page_num}",
-                                            "target": image_meta["id"],
-                                            "position": "at_location"
-                                        })
-                            except Exception as e:
-                                logger.warning(f"Failed to extract image {img_index} from page {page_num}: {e}")
-                        
-                        # If text extraction failed, try OCR on the page
-                        if not page_text and self.doc_config["pdf_settings"]["use_ocr_fallback"]:
-                            # Convert page to image for OCR
-                            pix = page.get_pixmap()
-                            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                            ocr_text = self._perform_ocr(img)
-                            if ocr_text:
-                                text_content.append(ocr_text)
-        
+                    # Fallback to OCR if needed
+                    if not page_text and self.doc_config["pdf_settings"]["use_ocr_fallback"]:
+                        pix = page.get_pixmap()
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        ocr_text = self._perform_ocr(img)
+                        if ocr_text:
+                            text_content.append(ocr_text)
+            
         except Exception as e:
             logger.error(f"Error processing PDF {file_path}: {e}")
             raise
@@ -566,6 +562,181 @@ class DocumentProcessor:
             "images": images,
             "relationships": relationships
         }
+
+    def _extract_pdf_images(self, page: fitz.Page, page_num: int, pdf: fitz.Document, 
+                            images: List[Dict[str, Any]], relationships: List[Dict[str, Any]]) -> None:
+        """Extract and filter images from PDF page."""
+        try:
+            # Get list of images on the page
+            image_list = page.get_images(full=True)  # Get full image info
+            
+            for img_index, img_info in enumerate(image_list):
+                try:
+                    xref = img_info[0]  # Image reference
+                    base_image = pdf.extract_image(xref)
+                    
+                    if base_image:
+                        # Convert to PIL Image for analysis
+                        image_data = base_image["image"]
+                        image = Image.open(io.BytesIO(image_data))
+                        
+                        # Skip if image is too small (likely an icon)
+                        if image.size[0] < 100 or image.size[1] < 100:
+                            continue
+                            
+                        # Calculate image complexity using edge detection
+                        img_array = np.array(image.convert('L'))
+                        edges = cv2.Canny(img_array, 100, 200)
+                        complexity = np.sum(edges > 0) / (img_array.shape[0] * img_array.shape[1])
+                        
+                        # Skip if image is too simple (likely a logo or icon)
+                        if complexity < 0.01:
+                            continue
+                            
+                        # Skip if image appears to be a single color or gradient
+                        colors = image.getcolors(maxcolors=256)
+                        if colors is not None and len(colors) < 5:
+                            continue
+                        
+                        # Get image location and size on page
+                        bbox = page.get_image_bbox(xref)
+                        if bbox:
+                            location_info = {
+                                "page": page_num,
+                                "bbox": list(bbox),  # Convert rect to list
+                                "width": bbox.width,
+                                "height": bbox.height,
+                                "area_ratio": (bbox.width * bbox.height) / (page.rect.width * page.rect.height)
+                            }
+                            
+                            # Skip if image takes up too little page space
+                            if location_info["area_ratio"] < 0.01:
+                                continue
+                            
+                            # Save image and get metadata
+                            image_meta = self._save_image(image, pdf.name, location_info)
+                            
+                            if image_meta:
+                                images.append({
+                                    "id": image_meta["id"],
+                                    "image": image,
+                                    "metadata": image_meta
+                                })
+                                
+                                relationships.append({
+                                    "type": "page_content",
+                                    "source": f"page_{page_num}",
+                                    "target": image_meta["id"],
+                                    "position": "at_location",
+                                    "location": location_info
+                                })
+                                
+                except Exception as e:
+                    logger.warning(f"Failed to extract image {img_index} from page {page_num}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Error extracting images from page {page_num}: {e}")
+
+    def _enhance_image_quality(self, image: Image.Image) -> Image.Image:
+        """Enhance image quality for better OCR results."""
+        try:
+            # Convert to numpy array
+            img_array = np.array(image)
+            
+            # Convert to grayscale if needed
+            if len(img_array.shape) == 3:
+                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = img_array
+                
+            # Apply adaptive thresholding
+            binary = cv2.adaptiveThreshold(
+                gray, 255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, 11, 2
+            )
+            
+            # Denoise using median blur
+            denoised = cv2.medianBlur(binary, 3)
+            
+            # Deskew if needed
+            coords = np.column_stack(np.where(denoised > 0))
+            angle = cv2.minAreaRect(coords)[-1]
+            if angle < -45:
+                angle = 90 + angle
+            if abs(angle) > 0.5:
+                (h, w) = denoised.shape[:2]
+                center = (w // 2, h // 2)
+                M = cv2.getRotationMatrix2D(center, angle, 1.0)
+                rotated = cv2.warpAffine(
+                    denoised, M, (w, h),
+                    flags=cv2.INTER_CUBIC,
+                    borderMode=cv2.BORDER_REPLICATE
+                )
+            else:
+                rotated = denoised
+                
+            return Image.fromarray(rotated)
+        except Exception as e:
+            logger.error(f"Error enhancing image quality: {e}")
+            return image
+
+    def _is_heading(self, span: Dict[str, Any]) -> bool:
+        """Detect if text span is a heading based on font properties."""
+        return (span["size"] > 12 and span["flags"] & 2**3) or span["size"] > 14  # Check bold flag or large size
+
+    def _is_list_item(self, span: Dict[str, Any]) -> bool:
+        """Detect if text span is a list item."""
+        text = span["text"].strip()
+        return text.startswith(("•", "-", "*", "○", "▪", "◦")) or re.match(r"^\d+\.", text)
+
+    def _is_table_block(self, block: Dict[str, Any]) -> bool:
+        """Detect if block contains tabular data based on layout analysis."""
+        if not block.get("lines"):
+            return False
+        
+        # Check for consistent column alignment
+        x_positions = set()
+        for line in block["lines"]:
+            for span in line["spans"]:
+                x_positions.add(round(span["origin"][0], 1))
+        
+        return len(x_positions) > 2 and all(
+            abs(x1 - x2) > 5 for x1, x2 in zip(sorted(x_positions)[:-1], sorted(x_positions)[1:])
+        )
+
+    def _extract_table_content(self, block: Dict[str, Any]) -> str:
+        """Extract and format tabular content."""
+        if not block.get("lines"):
+            return ""
+        
+        # Collect column positions
+        x_positions = set()
+        for line in block["lines"]:
+            for span in line["spans"]:
+                x_positions.add(round(span["origin"][0], 1))
+        x_positions = sorted(list(x_positions))
+        
+        # Build table rows
+        table_rows = []
+        for line in block["lines"]:
+            row = [""] * len(x_positions)
+            for span in line["spans"]:
+                col_idx = bisect.bisect_left(x_positions, round(span["origin"][0], 1))
+                if 0 <= col_idx < len(row):
+                    row[col_idx] += span["text"].strip()
+            if any(cell.strip() for cell in row):
+                table_rows.append(row)
+        
+        # Format as markdown table
+        if table_rows:
+            header = "| " + " | ".join(["" for _ in range(len(x_positions))]) + " |"
+            separator = "|" + "|".join(["---" for _ in range(len(x_positions))]) + "|"
+            rows = [
+                "| " + " | ".join(row) + " |"
+                for row in table_rows
+            ]
+            return "\n".join([header, separator] + rows)
     
     def _process_powerpoint(self, file_path: Path) -> Dict[str, Any]:
         """Process PowerPoint presentations."""

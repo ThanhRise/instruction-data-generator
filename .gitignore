@@ -25,3 +25,9 @@ Thumbs.db
 
 # Ignore environment config
 config/.env
+
+# Ignore temporary files
+*.tmp
+*.temp
+*.bak
+temp/
