@@ -1,7 +1,7 @@
 paths:
-  base_dir: "."
-  cache_dir: ".cache"
-  model_dir: "models"
+  base_dir: "/home/jovyan/nmt-srv-shared/users/thanhmv/practice_research/AI_agent/instruction-data-generator"
+  cache_dir: "/home/jovyan/nmt-srv-shared/users/thanhmv/practice_research/AI_agent/instruction-data-generator/.cache"
+  model_dir: "/home/jovyan/nmt-srv-shared/users/thanhmv/practice_research/AI_agent/instruction-data-generator/models"
 
 agent:
   name: "InstructionDataGenerator"
@@ -11,7 +11,7 @@ agent:
   input_processing:
     max_workers: 4
     batch_size: 100
-    reprocess_existing: false
+    reprocess_existing: true
     max_file_size_mb: 50
     supported_formats:
       documents:

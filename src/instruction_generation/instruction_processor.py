@@ -1,4 +1,5 @@
-from typing import Dict, List, Any, Optional
+import time
+from typing import Dict, List, Any, Optional, Tuple
 import logging
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
@@ -7,6 +8,7 @@ import numpy as np
 from ..models.model_loader import ModelLoader
 from ..utils.helpers import chunk_text
 import json
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -198,9 +200,16 @@ Respond with only a score between 0 and 1:"""
             logger.error(f"Error merging chunks: {e}")
             return chunks
 
-    def generate_instruction_data(self, chunks: List[str]) -> List[Dict[str, Any]]:
-        """Generate instruction data directly using LLM."""
+    def generate_instruction_data(self, chunks: List[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Generate instruction data directly using LLM.
+        
+        Returns:
+            Tuple containing:
+            - List of successful instruction data pairs
+            - List of failed pairs with failure reasons
+        """
         instruction_data = []
+        all_failed_pairs = []
         
         try:
             for chunk in chunks:
@@ -208,15 +217,28 @@ Respond with only a score between 0 and 1:"""
                 qa_pairs = self._generate_qa_pairs(chunk)
                 instruction_data.extend(qa_pairs)
             
-            # Filter duplicates and validate
-            unique_data = self._filter_duplicates(instruction_data)
-            validated_data = self._validate_instruction_data(unique_data)
+            if not instruction_data:
+                logger.warning("No instruction data generated from chunks")
+                return [], []
             
-            return validated_data
+            # Filter duplicates
+            unique_data = self._filter_duplicates(instruction_data)
+            
+            # Validate and get both successful and failed pairs
+            validated_data, failed_pairs = self._validate_instruction_data(unique_data)
+            
+            # Log generation statistics
+            logger.info(f"""Instruction data generation complete:
+                Generated: {len(instruction_data)}
+                After deduplication: {len(unique_data)}
+                Validated: {len(validated_data)}
+                Failed: {len(failed_pairs)}""")
+            
+            return validated_data, failed_pairs
             
         except Exception as e:
             logger.error(f"Error generating instruction data: {e}")
-            return []
+            return [], instruction_data  # Return all as failed if process errors out
 
     def _generate_qa_pairs(self, text: str) -> List[Dict[str, Any]]:
         """Generate question-answer pairs with instructions using LLM."""
@@ -379,80 +401,188 @@ Generate the triplets now:"""
     def _validate_instruction_data(
         self,
         qa_pairs: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """Validate generated instruction data with comprehensive checks."""
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Validate generated instruction data with comprehensive checks.
+        
+        Returns:
+            Tuple containing:
+            - List of validated pairs that passed all checks
+            - List of failed pairs with failure reasons
+        """
         validated_pairs = []
+        failed_pairs = []
         
         try:
             for pair in qa_pairs:
                 # Skip invalid pairs
                 if not all(pair.get(field) for field in ["question", "answer", "instruction", "context"]):
-                    logger.warning(f"Skipping validation of incomplete pair: {pair}")
+                    failed_pairs.append({
+                        "pair": pair,
+                        "reason": "Missing required fields",
+                        "fields": [field for field in ["question", "answer", "instruction", "context"] if not pair.get(field)]
+                    })
                     continue
                 
-                # Comprehensive validation prompt
-                validation_prompt = '''Validate this instruction triplet for quality and completeness:
+                # Enhanced validation prompt with strict formatting
+                validation_prompt = '''Carefully validate this instruction triplet against specific quality criteria.
+Please analyze ONLY based on the provided context, without using external knowledge.
 
-Context:
+CONTEXT:
 """
 {}
 """
 
+TRIPLET TO VALIDATE:
 Question: {}
 Answer: {}
 Instruction: {}
 
-Validation criteria:
-1. Answer Validity:
-   - Is the answer fully supported by the context?
-   - Is the answer complete and accurate?
+VALIDATION CRITERIA:
+1. Answer Validity
+- The answer MUST be fully supported by the context (no external information)
+- The answer must be complete and accurately represent the information
+- The answer should be relevant to the question
 
-2. Question Quality:
-   - Is the question clear and unambiguous?
-   - Is it specific to the context?
-   - Does it require understanding (not just fact lookup)?
+2. Question Quality
+- The question must be clear, specific, and unambiguous
+- The question should be answerable solely from the context
+- The question should test understanding, not just fact recall
+- The question must be grammatically correct
 
-3. Instruction Effectiveness:
-   - Are the steps clear and logical?
-   - Do they lead to the correct answer?
-   - Are they grounded in the context?
+3. Instruction Quality
+- Instructions must provide clear, step-by-step guidance
+- Steps should lead logically to the correct answer
+- Instructions must reference only information from the context
+- Instructions should be actionable and clear
 
-4. Overall Coherence:
-   - Do the question, answer, and instruction work together?
-   - Is everything derived purely from the context?
-
-Return a JSON object like this, with no other text:
-{{"valid": true/false, "scores": {{"answer_validity": 0.95, "question_quality": 0.85, "instruction_quality": 0.9}}}}'''.format(
+REQUIRED RESPONSE FORMAT:
+Return ONLY a JSON object in this exact format, with no additional text:
+{{
+    "valid": boolean,
+    "scores": {{
+        "answer_validity": float,    // Score from 0-1
+        "question_quality": float,   // Score from 0-1
+        "instruction_quality": float // Score from 0-1
+    }},
+    "issues": [string],  // List of specific issues found, empty if valid
+    "improvements": [string]  // Suggested improvements, empty if perfect
+}}'''.format(
                     pair['context'],
                     pair['question'],
                     pair['answer'],
                     pair['instruction']
                 )
 
-                # Get validation results
-                response = self._get_llm_response(validation_prompt)
-                try:
-                    validation_result = json.loads(response.strip())
+                # Get and parse validation results with retries
+                validation_result = self._get_validation_result(validation_prompt)
+                
+                if validation_result:
+                    # Add validation scores to the pair
+                    pair["validation_scores"] = validation_result.get("scores", {})
+                    pair["validation_issues"] = validation_result.get("issues", [])
                     
-                    # Check overall validity and quality thresholds
+                    # Check if pair meets quality thresholds
                     if (
                         validation_result.get("valid", False) and
-                        all(
-                            validation_result.get("scores", {}).get(metric, 0) >= 0.7
-                            for metric in ["answer_validity", "question_quality", "instruction_quality"]
-                        )
+                        self._meets_quality_thresholds(validation_result.get("scores", {}))
                     ):
                         validated_pairs.append(pair)
                     else:
-                        logger.info(f"Pair failed validation: {validation_result}")
-                        
-                except json.JSONDecodeError:
-                    logger.warning(f"Invalid validation response format: {response}")
-                    continue
-        
+                        failed_pairs.append({
+                            "pair": pair,
+                            "reason": "Failed quality validation",
+                            "scores": validation_result.get("scores", {}),
+                            "issues": validation_result.get("issues", []),
+                            "improvements": validation_result.get("improvements", [])
+                        })
+                else:
+                    failed_pairs.append({
+                        "pair": pair,
+                        "reason": "Validation parsing failed"
+                    })
+            
+            # Log validation statistics
+            total = len(qa_pairs)
+            validated = len(validated_pairs)
+            failed = len(failed_pairs)
+            logger.info(f"Validation complete - Total: {total}, Passed: {validated}, Failed: {failed}")
+            
+            return validated_pairs, failed_pairs
+            
         except Exception as e:
             logger.error(f"Error in validation: {e}")
-            return []
+            return [], qa_pairs  # Return all pairs as failed if validation errors out
+
+    def _get_validation_result(self, prompt: str, max_retries: int = 3) -> Optional[Dict[str, Any]]:
+        """Get and parse validation results with retry logic."""
+        for attempt in range(max_retries):
+            try:
+                response = self._get_llm_response(prompt).strip()
+                
+                # Find JSON object in response using regex
+                json_match = re.search(r'\{[\s\S]*\}', response)
+                if json_match:
+                    result = json.loads(json_match.group())
+                    
+                    # Validate response structure
+                    if not self._is_valid_validation_response(result):
+                        logger.warning(f"Invalid validation response structure on attempt {attempt + 1}")
+                        continue
+                    
+                    return result
+                    
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON parsing failed on attempt {attempt + 1}: {e}")
+            except Exception as e:
+                logger.warning(f"Validation failed on attempt {attempt + 1}: {e}")
+            
+            # Wait briefly before retry
+            time.sleep(1)
+        
+        return None
+
+    def _is_valid_validation_response(self, response: Dict[str, Any]) -> bool:
+        """Check if validation response has the required structure."""
+        try:
+            # Check required fields exist
+            if not all(k in response for k in ["valid", "scores", "issues", "improvements"]):
+                return False
+            
+            # Check scores structure
+            required_scores = ["answer_validity", "question_quality", "instruction_quality"]
+            if not all(k in response["scores"] for k in required_scores):
+                return False
+            
+            # Validate score ranges
+            for score in response["scores"].values():
+                if not isinstance(score, (int, float)) or not 0 <= score <= 1:
+                    return False
+            
+            # Validate other fields
+            if not isinstance(response["valid"], bool):
+                return False
+            if not isinstance(response["issues"], list):
+                return False
+            if not isinstance(response["improvements"], list):
+                return False
+            
+            return True
+            
+        except Exception:
+            return False
+
+    def _meets_quality_thresholds(self, scores: Dict[str, float]) -> bool:
+        """Check if validation scores meet quality thresholds."""
+        min_scores = {
+            "answer_validity": self.proc_config.get("min_answer_validity_score", 0.7),
+            "question_quality": self.proc_config.get("min_question_quality_score", 0.7),
+            "instruction_quality": self.proc_config.get("min_instruction_quality_score", 0.7)
+        }
+        
+        return all(
+            scores.get(metric, 0) >= threshold
+            for metric, threshold in min_scores.items()
+        )
 
     def _get_llm_response(self, prompt: str) -> str:
         """Get response from LLM."""

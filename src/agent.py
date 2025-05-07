@@ -86,23 +86,32 @@ class InstructionDataGenerator:
             input_data = self.data_loader.load_data(input_dir)
             
             # Process each document
-            instruction_data = []
+            all_instruction_data = []
+            all_failed_pairs = []
+            
             for doc in input_data["documents"]:
                 # Process input data to get high-quality chunks
                 processed_chunks = self.instruction_processor.process_input_data(doc["content"])
                 
                 # Generate instruction data from chunks
-                doc_instructions = self.instruction_processor.generate_instruction_data(processed_chunks)
+                doc_instructions, failed_pairs = self.instruction_processor.generate_instruction_data(processed_chunks)
                 
                 # Add source information
                 for item in doc_instructions:
                     item["source"] = doc["source"]
+                for item in failed_pairs:
+                    if isinstance(item, dict) and "pair" in item:
+                        item["pair"]["source"] = doc["source"]
+                    else:
+                        # Handle case where the entire item is the failed pair
+                        item["source"] = doc["source"]
                 
-                instruction_data.extend(doc_instructions)
+                all_instruction_data.extend(doc_instructions)
+                all_failed_pairs.extend(failed_pairs)
             
             # Final quality filtering
             final_data = self.quality_filter.filter_qa_pairs(
-                instruction_data,
+                all_instruction_data,
                 {doc["source"]: doc["content"] for doc in input_data["documents"]}
             )
             
@@ -118,10 +127,21 @@ class InstructionDataGenerator:
                 )
                 self.metrics_logger.log_gpu_stats(self.current_model)
             
-            # Save results
+            # Save successful instruction data
             self._save_instruction_data(final_data, output_path)
             
-            logger.info(f"Generated {len(final_data)} instruction pairs")
+            # Save failed pairs for analysis if needed
+            if all_failed_pairs:
+                failed_path = output_path / "failed_pairs"
+                failed_path.mkdir(exist_ok=True)
+                self._save_instruction_data(all_failed_pairs, failed_path)
+            
+            # Log generation statistics
+            logger.info(f"""Instruction data generation complete:
+                Total generated: {len(all_instruction_data) + len(all_failed_pairs)}
+                Successfully validated: {len(all_instruction_data)}
+                Failed validation: {len(all_failed_pairs)}
+                After quality filtering: {len(final_data)}""")
             
         except Exception as e:
             if self.current_model:
