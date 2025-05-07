@@ -18,6 +18,7 @@ import io
 import uuid
 from datetime import datetime
 from .image_annotator import ImageAnnotator
+import bisect
 
 logger = logging.getLogger(__name__)
 
@@ -300,10 +301,11 @@ class DocumentProcessor:
                 # Extract comprehensive image content
                 result = self.image_annotator.process_image(image)
                 
+                source = img_data.get("paragraph_index", img_idx)
                 # Create relationship with enhanced context
                 relationship = {
                     "type": "embedded_content",
-                    "source": f"paragraph_{img_data.get("paragraph_index", img_idx)}",
+                    "source": f"paragraph_{source}",
                     "target": f"img_{img_idx}",
                     "context": self._generate_image_context(result)
                 }

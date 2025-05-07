@@ -102,6 +102,27 @@ agent:
             - "How does the visual style relate to {context}?"
             - "What design choices reinforce {context}?"
 
+    # Chunking settings
+    chunk_size: 1500  # Maximum chunk size in characters
+    chunk_overlap: 150  # Overlap between chunks
+    chunk_quality_threshold: 0.6  # Minimum quality score to keep a chunk
+    
+    # Processing settings
+    max_chunks_per_doc: 50  # Maximum chunks to process per document
+    min_chunk_length: 100  # Minimum length for a valid chunk
+    
+    # Generation settings
+    max_qa_pairs_per_chunk: 5  # Maximum QA pairs to generate per chunk
+    min_qa_pairs_per_chunk: 2  # Minimum QA pairs to generate per chunk
+    duplicate_threshold: 0.85  # Similarity threshold for duplicate detection
+    
+    # Quality thresholds
+    min_question_length: 10  # Minimum words in a question
+    max_question_length: 50  # Maximum words in a question
+    min_answer_length: 5  # Minimum words in an answer
+    max_answer_length: 100  # Maximum words in an answer
+    min_instruction_length: 15  # Minimum words in an instruction
+
   # Quality control settings
   quality_control:
     min_quality_score: 0.7
