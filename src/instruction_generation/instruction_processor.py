@@ -391,13 +391,16 @@ Generate the triplets now:"""
                     continue
                 
                 # Comprehensive validation prompt
-                validation_prompt = f"""Validate this instruction triplet for quality and completeness:
+                validation_prompt = '''Validate this instruction triplet for quality and completeness:
 
-Context: {pair['context']}
+Context:
+"""
+{}
+"""
 
-Question: {pair['question']}
-Answer: {pair['answer']}
-Instruction: {pair['instruction']}
+Question: {}
+Answer: {}
+Instruction: {}
 
 Validation criteria:
 1. Answer Validity:
@@ -418,20 +421,18 @@ Validation criteria:
    - Do the question, answer, and instruction work together?
    - Is everything derived purely from the context?
 
-Respond with a JSON object:
-{
-    "valid": true/false,
-    "scores": {
-        "answer_validity": 0-1,
-        "question_quality": 0-1,
-        "instruction_quality": 0-1
-    }
-}"""
+Return a JSON object like this, with no other text:
+{{"valid": true/false, "scores": {{"answer_validity": 0.95, "question_quality": 0.85, "instruction_quality": 0.9}}}}'''.format(
+                    pair['context'],
+                    pair['question'],
+                    pair['answer'],
+                    pair['instruction']
+                )
 
                 # Get validation results
                 response = self._get_llm_response(validation_prompt)
                 try:
-                    validation_result = json.loads(response)
+                    validation_result = json.loads(response.strip())
                     
                     # Check overall validity and quality thresholds
                     if (
@@ -448,9 +449,7 @@ Respond with a JSON object:
                 except json.JSONDecodeError:
                     logger.warning(f"Invalid validation response format: {response}")
                     continue
-                
-            return validated_pairs
-            
+        
         except Exception as e:
             logger.error(f"Error in validation: {e}")
             return []
